@@ -3,13 +3,14 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from pydantic import BaseModel, EmailStr, Field, field_validator
+from pydantic import BaseModel, Field, field_validator
 
 from app.utils.cuit import is_valid_cuit, format_cuit
 
 
 class Contacto(BaseModel):
-    email: EmailStr | None = None
+    # Acepta cualquier string — es metadata de la empresa, validado livianamente.
+    email: str | None = None
     telefono: str | None = None
     direccion: str | None = None
 

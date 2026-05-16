@@ -1,9 +1,11 @@
 """Schemas Pydantic v2 para usuarios (CRUD)."""
 from __future__ import annotations
 
-from pydantic import BaseModel, EmailStr, Field, field_validator
+from pydantic import BaseModel, Field, field_validator
 
 from app.models.enums import Rol
+
+_EMAIL_PATTERN = r"^[^\s@]+@[^\s@]+\.[^\s@]+$"
 
 
 class UsuarioResponse(BaseModel):
@@ -24,7 +26,7 @@ class UsuarioListResponse(BaseModel):
 
 class UsuarioCreateRequest(BaseModel):
     nombre: str = Field(min_length=2)
-    email: EmailStr
+    email: str = Field(pattern=_EMAIL_PATTERN)
     rol: Rol
     empresaId: str | None = None
     password: str | None = None  # si no viene, se autogenera

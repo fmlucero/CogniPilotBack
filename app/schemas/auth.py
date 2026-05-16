@@ -1,14 +1,19 @@
 """Schemas Pydantic v2 para auth (login/logout/me/refresh)."""
 from __future__ import annotations
 
-from pydantic import BaseModel, EmailStr, Field
+from pydantic import BaseModel, Field
 
 from app.models.enums import Rol
+
+# Misma regex que el back viejo (lib/cuit.ts del back Next, y el seed): permite
+# emails con TLDs reserved como ".local" usados internamente por el TIF.
+# Pydantic EmailStr es demasiado estricto.
+_EMAIL_PATTERN = r"^[^\s@]+@[^\s@]+\.[^\s@]+$"
 
 
 class LoginRequest(BaseModel):
     """POST /api/auth/login"""
-    email: EmailStr
+    email: str = Field(pattern=_EMAIL_PATTERN)
     password: str = Field(min_length=1)
     # Si viene de la app Android, registramos/actualizamos el dispositivo
     deviceUuid: str | None = None
