@@ -9,16 +9,21 @@ Reemplaza los route handlers de `cognipilot-remote` (Next.js). El front Next.js 
 | Capa | Tecnología | Por qué |
 |---|---|---|
 | HTTP | FastAPI 0.115 + Uvicorn | Async-first, OpenAPI auto, Pydantic v2 |
+| Validación | Pydantic v2 | Schemas request/response, field validators |
 | ORM | SQLAlchemy 2.0 async + asyncpg | Equivalente a Prisma del back viejo, mismo schema |
-| Migraciones | Alembic | Ownership del schema |
+| Migraciones | Alembic | Ownership del schema (+ baseline contra DB existente) |
 | DB | Postgres 16 | Misma DB del back viejo (preservación de datos) |
 | Pool conexiones | PgBouncer (transaction pooling) | Para escalar a N réplicas del API |
-| Cache + queue | Redis 7 | Reglas activas + cola arq |
-| Workers | arq (asyncio) | Equivalente a BullMQ para Python async |
+| Cache + queue | Redis 7 | Caché de reglas + backend de arq |
+| Workers async | arq (asyncio) | Equivalente a BullMQ para Python async |
 | Auth | JWT HS256 (python-jose) | Tokens compatibles con el back Next.js |
 | Hashing | bcrypt (rounds 10) | Compatible con hashes existentes en DB |
-| FCM | firebase-admin | Push notifications a la app Android |
-| Reverse proxy | nginx | Ruteo /api → FastAPI, /admin → Next.js |
+| FCM | firebase-admin | Push notifications a la app Android (notification+data) |
+| Instrumentación | prometheus-fastapi-instrumentator + prometheus-client | Métricas HTTP auto + counters/gauges/histograms de negocio |
+| Métricas store | Prometheus 3 | Scrapea `/metrics` cada 15s, retención 15d |
+| Dashboards OPS | Grafana 11 | Dashboard auto-provisioned con 8 paneles (drill-down técnico) |
+| Dashboards admin | Endpoints JSON `/api/metrics/*` role-protected | Embebidos en el panel web (Next.js), no requieren abrir Grafana |
+| Reverse proxy | nginx | Ruteo `/api` → FastAPI, `/admin` → Next.js (pendiente Fase B) |
 | Package mgr | uv | Rust-based, mucho más rápido que pip |
 
 ## Estructura
@@ -26,20 +31,49 @@ Reemplaza los route handlers de `cognipilot-remote` (Next.js). El front Next.js 
 ```
 cognipilot-back/
 ├── app/
-│   ├── main.py              ← FastAPI app + middlewares
-│   ├── core/                ← Config, DB, security, deps
-│   ├── models/              ← SQLAlchemy 2.0 (12 entidades)
-│   ├── schemas/             ← Pydantic v2 (request/response)
-│   ├── routers/             ← Endpoints (auth, empresas, usuarios, ...)
-│   ├── services/            ← Lógica de negocio (FCM, reglas)
-│   ├── utils/               ← Helpers (CUIT, password gen)
-│   └── workers/             ← arq tasks
-├── alembic/                 ← Migraciones DB
-├── scripts/                 ← Comandos auxiliares (baseline, seed, etc.)
-├── nginx/                   ← Config del reverse proxy
-├── Dockerfile               ← Multi-stage, una imagen sirve para API y workers
-├── docker-compose.yml       ← Stack completo (back + workers + postgres + redis + nginx)
-├── pyproject.toml           ← Deps (uv-friendly)
+│   ├── main.py                     ← FastAPI app + middlewares + instrumentator
+│   ├── core/
+│   │   ├── config.py               ← Settings (pydantic-settings, lee .env)
+│   │   ├── db.py                   ← Engine async + sessionmaker + Base
+│   │   ├── deps.py                 ← FastAPI Depends (DB, CurrentUser, require_roles)
+│   │   ├── security.py             ← JWT sign/verify + bcrypt
+│   │   └── observability.py        ← Prometheus instrumentator + métricas custom
+│   ├── models/                     ← SQLAlchemy 2.0 (12 entidades + 4 enums)
+│   │   ├── empresa.py, usuario.py, operacion.py, regla.py, eventos.py, enums.py
+│   ├── schemas/                    ← Pydantic v2 (request/response)
+│   │   ├── auth.py, empresa.py, usuario.py, dispositivo.py,
+│   │   ├── evento.py, schedule.py, posicion.py, metrics.py
+│   ├── routers/                    ← Endpoints HTTP
+│   │   ├── health.py               ← /health, /health/db
+│   │   ├── auth.py                 ← /api/auth/{login,logout,me,refresh}
+│   │   ├── empresas.py             ← /api/empresas[/{id}]
+│   │   ├── usuarios.py             ← /api/usuarios[/{id}]
+│   │   ├── schedule.py             ← /api/schedule (con FCM push)
+│   │   ├── events.py               ← /api/events (GET + POST)
+│   │   ├── devices.py              ← /api/devices/register
+│   │   └── metrics.py              ← /api/metrics/{overview,timeseries} (admin)
+│   ├── services/
+│   │   ├── fcm.py                  ← Firebase Admin SDK (notification+data)
+│   │   └── prometheus_client.py    ← Cliente HTTP de Prometheus para timeseries
+│   ├── utils/
+│   │   ├── cuit.py                 ← Validación liviana CUIT
+│   │   └── password.py             ← Generador temp 12 chars
+│   └── workers/
+│       └── tasks.py                ← arq WorkerSettings + tasks (FCM, bulk, position)
+├── alembic/                        ← Migraciones DB
+│   ├── env.py, script.py.mako, versions/
+├── monitoring/                     ← Stack OPS (profile "monitoring")
+│   ├── prometheus.yml              ← Config de scraping
+│   └── grafana/
+│       ├── provisioning/           ← Datasource + dashboards auto-load
+│       └── dashboards/cognipilot-overview.json
+├── scripts/
+│   ├── baseline_alembic.md         ← Cómo tomar ownership de la DB sin downtime
+│   └── seed.py                     ← Port de prisma/seed.ts (mismo dataset)
+├── nginx/                          ← Config del reverse proxy (pendiente Fase B)
+├── Dockerfile                      ← Multi-stage, una imagen sirve para API y workers
+├── docker-compose.yml              ← Stack completo + profiles (monitoring, dev)
+├── pyproject.toml                  ← Deps (uv-friendly)
 └── alembic.ini
 ```
 
@@ -47,23 +81,37 @@ cognipilot-back/
 
 ```powershell
 # 1. Instalar uv si no está: https://docs.astral.sh/uv/getting-started/installation/
-# 2. Sync deps (crea .venv automáticamente)
+
+# 2. Sync deps (crea .venv automáticamente y bloquea con uv.lock)
 uv sync
 
-# 3. Copiar .env.example a .env y completar (mismo JWT_SECRET que cognipilot-remote)
+# 3. Copiar .env.example a .env y completar
+#    Importante: usar el MISMO JWT_SECRET / JWT_REFRESH_SECRET que cognipilot-remote
+#    para que los tokens sigan validándose durante el cutover.
 copy .env.example .env
 
-# 4. Levantar dependencias (postgres + redis) — desde la VM o local
-# Si la DB ya existe en la VM con datos, apuntar DATABASE_URL a 10.201.0.67:5432
+# 4. Para dev local, podés apuntar DATABASE_URL a la VM por ZeroTier:
+#    DATABASE_URL=postgresql+asyncpg://cognipilot:<pw>@10.201.0.67:5432/cognipilot
+#    DATABASE_URL_SYNC=postgresql://cognipilot:<pw>@10.201.0.67:5432/cognipilot
 
-# 5. Correr API en modo dev
+# 5. Correr API en modo dev (auto-reload)
 uv run uvicorn app.main:app --reload --port 8000
 
-# 6. Correr worker arq
+# 6. Correr worker arq (en otra terminal)
 uv run arq app.workers.tasks.WorkerSettings
+
+# 7. Correr el seed (solo primera vez en una DB fresca)
+uv run python -m scripts.seed
 ```
 
-OpenAPI UI: http://localhost:8000/docs
+| URL | Para qué |
+|---|---|
+| `http://localhost:8000/docs` | OpenAPI / Swagger UI |
+| `http://localhost:8000/redoc` | ReDoc |
+| `http://localhost:8000/health` | Liveness check |
+| `http://localhost:8000/health/db` | Readiness check (SELECT 1) |
+| `http://localhost:8000/metrics` | Prometheus exposition format |
+| `http://localhost:8000/api/metrics/overview` | JSON métricas (requiere auth admin) |
 
 ## Deploy en la VM UM-Cloud
 
@@ -78,20 +126,23 @@ ssh -i F:\Proys\cognipilot-um.pem ubuntu@10.201.0.67 'cd ~/cognipilot-back; dock
 ssh -i F:\Proys\cognipilot-um.pem ubuntu@10.201.0.67 'cd ~/cognipilot-back; docker compose up -d --scale back-api=4'
 ```
 
-## Migración desde el back viejo (Next.js)
+## Migración desde el back viejo (Next.js) — plan de cutover sin downtime
 
-Plan de cutover sin downtime:
+| # | Paso | Estado |
+|---|---|---|
+| 1 | Skeleton + auth + CRUDs (empresas, usuarios) | ✅ |
+| 2 | Endpoints schedule + events + devices/register | ✅ |
+| 3 | Observabilidad (Prometheus + endpoints `/api/metrics`) | ✅ |
+| 4 | Seed Python equivalente al de Prisma | ✅ |
+| 5 | Alembic baseline → stamp DB existente | ⏳ |
+| 6 | Levantar `back-api` en paralelo en la VM, validar contra DB real | ⏳ |
+| 7 | arq async para FCM push + endpoints calientes (`/events/bulk`, `/positions`) | ⏳ |
+| 8 | nginx adelante (ruteo `/api` → FastAPI, `/admin` → Next.js) | ⏳ |
+| 9 | Modificar Next.js: drop `app/api/*` + `lib/{prisma,jwt,auth,firebase-admin,password,cuit}.ts`, las páginas hacen fetch a FastAPI | ⏳ |
+| 10 | Cloudflare Tunnel pasa a apuntar a nginx | ⏳ |
+| 11 | Dashboard React en el admin Next.js consumiendo `/api/metrics/*` | ⏳ |
 
-1. **Skeleton + auth + CRUDs** ← este commit
-2. Alembic baseline → stamp DB existente
-3. Levantar back-api en paralelo en la VM (otro puerto), validar con curl
-4. Migrar endpoints restantes (schedule, events, devices)
-5. Setup arq + FCM async + endpoints calientes
-6. nginx adelante
-7. Modificar Next.js: drop `app/api/*`, las páginas hacen fetch a FastAPI
-8. Cutover Cloudflare Tunnel apunta a nginx
-
-Tokens JWT viejos siguen funcionando (mismo HS256, mismo secret, mismas claims).
+Tokens JWT viejos siguen funcionando (mismo HS256, mismo secret, mismas claims) → cuando hagamos el cutover **nadie se desloguea**.
 
 ## Observabilidad
 
