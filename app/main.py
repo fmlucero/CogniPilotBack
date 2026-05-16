@@ -1,18 +1,36 @@
 """CogniPilot Back — FastAPI app entrypoint.
 
 Levanta la app, configura logging, CORS, instrumentación Prometheus, monta routers.
+Lifespan: inicializa el pool de arq (Redis) y un loop async que refresca los gauges
+de active_devices y queue_depth cada 30s.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 from contextlib import asynccontextmanager
+from datetime import datetime, timedelta, timezone
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy import func, select
 
+from app.core.arq_client import close_arq_pool, get_arq_pool, init_arq_pool
 from app.core.config import get_settings
-from app.core.observability import make_instrumentator
-from app.routers import auth, devices, empresas, events, health, metrics, schedule, usuarios
+from app.core.db import SessionLocal
+from app.core.observability import active_devices, make_instrumentator, queue_depth
+from app.models.usuario import Dispositivo
+from app.routers import (
+    auth,
+    devices,
+    empresas,
+    events,
+    health,
+    metrics,
+    positions,
+    schedule,
+    usuarios,
+)
 
 # Configurar logging
 settings = get_settings()
@@ -23,17 +41,97 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Background loop — refresca gauges de "estado vivo" cada 30s
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+async def _refresh_live_gauges() -> None:
+    """Actualiza cognipilot_active_devices y cognipilot_arq_queue_depth.
+
+    Corre dentro del proceso de la API para que `/metrics` lo exponga al scrape
+    de Prometheus. Es un loop perpetuo cancelable desde el lifespan.
+    """
+    while True:
+        try:
+            now = datetime.now(timezone.utc)
+            async with SessionLocal() as db:
+                c5m = (
+                    await db.execute(
+                        select(func.count(Dispositivo.id)).where(
+                            Dispositivo.lastSeen >= now - timedelta(minutes=5)
+                        )
+                    )
+                ).scalar() or 0
+                c24h = (
+                    await db.execute(
+                        select(func.count(Dispositivo.id)).where(
+                            Dispositivo.lastSeen >= now - timedelta(hours=24)
+                        )
+                    )
+                ).scalar() or 0
+            active_devices.labels(window="5m").set(c5m)
+            active_devices.labels(window="24h").set(c24h)
+
+            # arq guarda los jobs pendientes como sorted set "arq:queue".
+            # zcard nos da la profundidad (sin scorear).
+            try:
+                arq = get_arq_pool()
+                depth = await arq.zcard("arq:queue")  # type: ignore[attr-defined]
+                queue_depth.labels(queue="arq:queue").set(int(depth))
+            except Exception:  # noqa: BLE001
+                # Si Redis está caído o arq no inicializado, no es crítico.
+                pass
+
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001
+            logger.exception("refresh_live_gauges iteration failed")
+
+        try:
+            await asyncio.sleep(30)
+        except asyncio.CancelledError:
+            raise
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Lifespan
+# ─────────────────────────────────────────────────────────────────────────────
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Startup/shutdown hooks."""
     logger.info(
         "CogniPilot Back starting up — env=%s, db=%s",
         settings.app_env,
-        settings.database_url.split("@")[-1],  # solo host:puerto/db, sin creds
+        settings.database_url.split("@")[-1],
     )
-    yield
-    logger.info("CogniPilot Back shutting down")
 
+    # Inicializar pool arq. Si Redis no está disponible, los endpoints que
+    # dependen de enqueueing harán fallback a sync (FCM) o devolverán 503.
+    try:
+        await init_arq_pool()
+    except Exception as e:  # noqa: BLE001
+        logger.warning("Could not initialize arq pool at startup: %s", e)
+
+    # Loop de actualización de gauges
+    gauges_task = asyncio.create_task(_refresh_live_gauges())
+
+    try:
+        yield
+    finally:
+        gauges_task.cancel()
+        try:
+            await gauges_task
+        except asyncio.CancelledError:
+            pass
+        await close_arq_pool()
+        logger.info("CogniPilot Back shutting down")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# App factory
+# ─────────────────────────────────────────────────────────────────────────────
 
 app = FastAPI(
     title="CogniPilot Back",
@@ -44,7 +142,6 @@ app = FastAPI(
     redoc_url="/redoc" if settings.is_dev else None,
 )
 
-# CORS (necesario si front corre en otro origen durante dev)
 if settings.cors_origin_list:
     app.add_middleware(
         CORSMiddleware,
@@ -67,6 +164,7 @@ app.include_router(usuarios.router)
 app.include_router(schedule.router)
 app.include_router(events.router)
 app.include_router(devices.router)
+app.include_router(positions.router)
 app.include_router(metrics.router)
 
 

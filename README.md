@@ -113,6 +113,25 @@ uv run python -m scripts.seed
 | `http://localhost:8000/metrics` | Prometheus exposition format |
 | `http://localhost:8000/api/metrics/overview` | JSON métricas (requiere auth admin) |
 
+## Endpoints calientes (alto throughput)
+
+| Endpoint | Modo | Beneficio |
+|---|---|---|
+| `POST /api/schedule` | Encola FCM en arq, responde inmediato | Latencia <20ms (vs ~200ms del sync) |
+| `POST /api/events/bulk` | Bulk insert en una transacción, max 500 eventos | Una sola conexión DB, en vez de 500 INSERTs |
+| `POST /api/positions` | Inline con haversine: si difiere <10m de la última, NO inserta fila (solo actualiza `lastLat/lastLng/lastSeen`) | Controla crecimiento de la tabla con repartidor parado |
+
+Si Redis se cae, `POST /api/schedule` hace fallback a sync FCM (no se pierde el push).
+
+## Background jobs (in-process)
+
+El proceso del API corre un loop async que cada 30s actualiza los gauges:
+
+- `cognipilot_active_devices{window="5m"}` y `{window="24h"}` — count desde Postgres
+- `cognipilot_arq_queue_depth{queue="arq:queue"}` — `ZCARD` sobre Redis
+
+Esto hace que Grafana y el dashboard del admin tengan series temporales actualizadas sin necesidad de un cron externo.
+
 ## Deploy en la VM UM-Cloud
 
 ```powershell
@@ -134,13 +153,15 @@ ssh -i F:\Proys\cognipilot-um.pem ubuntu@10.201.0.67 'cd ~/cognipilot-back; dock
 | 2 | Endpoints schedule + events + devices/register | ✅ |
 | 3 | Observabilidad (Prometheus + endpoints `/api/metrics`) | ✅ |
 | 4 | Seed Python equivalente al de Prisma | ✅ |
-| 5 | Alembic baseline → stamp DB existente | ⏳ |
-| 6 | Levantar `back-api` en paralelo en la VM, validar contra DB real | ⏳ |
-| 7 | arq async para FCM push + endpoints calientes (`/events/bulk`, `/positions`) | ⏳ |
-| 8 | nginx adelante (ruteo `/api` → FastAPI, `/admin` → Next.js) | ⏳ |
-| 9 | Modificar Next.js: drop `app/api/*` + `lib/{prisma,jwt,auth,firebase-admin,password,cuit}.ts`, las páginas hacen fetch a FastAPI | ⏳ |
-| 10 | Cloudflare Tunnel pasa a apuntar a nginx | ⏳ |
-| 11 | Dashboard React en el admin Next.js consumiendo `/api/metrics/*` | ⏳ |
+| 5 | arq async para FCM push (`POST /api/schedule` ahora encola) | ✅ |
+| 6 | Endpoints calientes: `POST /api/events/bulk` (bulk insert), `POST /api/positions` (haversine + diff) | ✅ |
+| 7 | Loop periódico que refresca gauges (active_devices, queue_depth) | ✅ |
+| 8 | nginx config para reverse proxy (`/api` → FastAPI, resto → Next.js) | ✅ |
+| 9 | Alembic baseline → stamp DB existente | ⏳ |
+| 10 | Levantar `back-api` en paralelo en la VM, validar contra DB real | ⏳ |
+| 11 | Modificar Next.js: drop `app/api/*` + `lib/{prisma,jwt,auth,firebase-admin,password,cuit}.ts`, las páginas hacen fetch a FastAPI | ⏳ |
+| 12 | Cloudflare Tunnel pasa a apuntar a nginx | ⏳ |
+| 13 | Dashboard React en el admin Next.js consumiendo `/api/metrics/*` | ⏳ |
 
 Tokens JWT viejos siguen funcionando (mismo HS256, mismo secret, mismas claims) → cuando hagamos el cutover **nadie se desloguea**.
 

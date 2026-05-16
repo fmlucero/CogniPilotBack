@@ -147,6 +147,12 @@ services:
     networks:
       - cognipilot-net
     profiles: ["with-nginx"]  # Activar con: docker compose --profile with-nginx up
+    # Healthcheck simple
+    healthcheck:
+      test: ["CMD", "nginx", "-t"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
 
   # ─────────────────────────────────────────────────────────────────────────
   # Observabilidad — perfil "monitoring"

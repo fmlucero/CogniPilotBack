@@ -1,11 +1,17 @@
 """arq worker — Redis-backed async job queue.
 
-Para arrancarlo: `arq app.workers.tasks.WorkerSettings`
+Arrancarlo: `arq app.workers.tasks.WorkerSettings`
 
-Tareas (placeholder; se desarrollan en Fase B):
-  - send_schedule_push: enviar push FCM async (saca a FCM del request path)
-  - bulk_insert_events: drenar cola de eventos y bulk insert a Postgres
-  - process_position: aplicar lógica "solo insertar si difiere >Xm"
+Tareas actuales:
+  - send_schedule_push_task: enviar push FCM async (saca FCM del request path)
+
+Diseño:
+  - /api/events/bulk    → procesamiento inline en una transacción (suficiente para 30k usuarios)
+  - /api/positions      → procesamiento inline con haversine (1 SELECT + 1 INSERT/UPDATE)
+  - /api/schedule POST  → ENCOLA acá (1 sola en uso, evita bloquear request en Google FCM)
+
+Si más adelante el load testing muestra que /events/bulk o /positions saturan,
+podemos mover esos a tasks acá con bulk_insert_events_task / process_position_task.
 """
 from __future__ import annotations
 
@@ -30,9 +36,10 @@ async def send_schedule_push_task(
     time_to: str,
     tz: str,
 ) -> str:
-    """Sends an FCM push notification to the schedule-updates topic.
+    """Envía un push FCM al topic schedule-updates.
 
-    Runs in the arq worker. Retry up to 3 times on failure.
+    Se ejecuta en el worker arq. Hasta 3 reintentos automáticos en caso de
+    fallo transitorio (configurado en WorkerSettings.max_tries).
     """
     msg_id = _send_schedule_push(
         enabled=enabled, time_from=time_from, time_to=time_to, tz=tz
@@ -41,44 +48,14 @@ async def send_schedule_push_task(
     return msg_id
 
 
-async def bulk_insert_events_task(ctx: dict[str, Any], events: list[dict]) -> int:
-    """Placeholder Fase B: drenar cola de eventos y bulk insert.
-
-    Tomar la lista, validar, insertar con `bulk_insert_mappings` o `insert(...).values([...])`.
-    """
-    logger.info("bulk_insert_events_task received %d events (TODO Fase B)", len(events))
-    return len(events)
-
-
-async def process_position_task(
-    ctx: dict[str, Any],
-    *,
-    device_uuid: str,
-    lat: str,
-    lng: str,
-    ts_ms: int,
-) -> bool:
-    """Placeholder Fase B: aplicar lógica de 'solo insertar si difiere'.
-
-    Lee última Posicion del dispositivo, compara con la nueva, decide si inserta
-    en Posicion o solo actualiza Dispositivo.lastLat/Lng/lastSeen.
-    """
-    logger.info("process_position_task received: %s @ %s,%s (TODO Fase B)", device_uuid, lat, lng)
-    return False
-
-
 class WorkerSettings:
     """arq Worker config."""
 
-    functions = [
-        send_schedule_push_task,
-        bulk_insert_events_task,
-        process_position_task,
-    ]
+    functions = [send_schedule_push_task]
 
     redis_settings = RedisSettings.from_dsn(_settings.redis_url)
 
-    # Retries y timeouts conservadores
+    # Retries automáticos en fallos transitorios
     max_tries = 3
     job_timeout = 30
     keep_result = 60
