@@ -134,15 +134,52 @@ Esto hace que Grafana y el dashboard del admin tengan series temporales actualiz
 
 ## Deploy en la VM UM-Cloud
 
-```powershell
-# Desde el repo en GitHub:
-ssh -i F:\Proys\cognipilot-um.pem ubuntu@10.201.0.67 'cd ~/cognipilot-back; git pull; docker compose up -d --build'
+El compose soporta **dos modos**:
 
-# Logs en vivo (todos los servicios):
-ssh -i F:\Proys\cognipilot-um.pem ubuntu@10.201.0.67 'cd ~/cognipilot-back; docker compose logs -f'
+### Modo PARALELO (default — para validar antes del cutover)
+
+El back-api corre junto al back viejo (Next.js sigue en :3000). back-api conecta al **postgres existente** del back viejo via `host.docker.internal:5432`. Postgres y pgbouncer del compose nuevo **no se levantan**.
+
+```powershell
+# 1. Clonar en la VM
+ssh -i F:\Proys\cognipilot-um.pem ubuntu@10.201.0.67
+git clone https://github.com/fmlucero/CogniPilotBack.git cognipilot-back
+cd cognipilot-back
+
+# 2. Crear .env con los MISMOS JWT_SECRET y POSTGRES_PASSWORD que el back viejo:
+cp .env.example .env
+nano .env   # completar con valores del back viejo
+
+# 3. Levantar solo redis + back-api + back-worker
+docker compose up -d --build redis back-api back-worker
+
+# 4. Ver logs
+docker compose logs -f back-api back-worker
+```
+
+Necesario: agregar regla TCP **8001** en el security group `cognipilot-um` desde `192.168.3.0/24`.
+
+Validación rápida (desde PC con ZeroTier):
+```powershell
+curl http://10.201.0.67:8001/health
+curl http://10.201.0.67:8001/api/schedule   # GET público, devuelve la regla seeded
+```
+
+### Modo BUNDLED (post-cutover, todo en este compose)
+
+```powershell
+# Editar .env: comentar las DATABASE_URL de modo paralelo, descomentar las de @pgbouncer/@postgres
+ssh -i F:\Proys\cognipilot-um.pem ubuntu@10.201.0.67
+cd cognipilot-back
+
+# Stack completo
+docker compose --profile bundled-db --profile with-nginx up -d --build
+
+# Con monitoreo:
+docker compose --profile bundled-db --profile with-nginx --profile monitoring up -d --build
 
 # Escalar el API a 4 réplicas:
-ssh -i F:\Proys\cognipilot-um.pem ubuntu@10.201.0.67 'cd ~/cognipilot-back; docker compose up -d --scale back-api=4'
+docker compose up -d --scale back-api=4
 ```
 
 ## Migración desde el back viejo (Next.js) — plan de cutover sin downtime

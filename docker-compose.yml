@@ -1,20 +1,32 @@
 # CogniPilot — stack completo (back + workers + front + infra)
-# Levantar desde F:\Proys\cognipilot-back\ con: docker compose up -d --build
+#
+# Dos modos de operación:
+#
+#  A) MODO PARALELO (validar contra el back viejo, mismo postgres)
+#     postgres y pgbouncer NO arrancan (están en profile bundled-db).
+#     back-api conecta al postgres del back viejo via host.docker.internal:5432.
+#     Levantar:  docker compose up -d redis back-api back-worker
+#
+#  B) MODO BUNDLED (post-cutover, todo en este compose)
+#     postgres + pgbouncer en este compose, todo cohesionado.
+#     Levantar:  docker compose --profile bundled-db up -d
+#                docker compose --profile bundled-db --profile with-nginx --profile with-front up -d
 #
 # Topología:
-#   - postgres   ← DB principal (16-alpine)
-#   - pgbouncer  ← pool de conexiones (transaction pooling) entre back y postgres
-#   - redis      ← caché + backend de arq
+#   - postgres   ← DB principal (profile bundled-db)
+#   - pgbouncer  ← pool de conexiones (profile bundled-db)
+#   - redis      ← caché + backend de arq (siempre)
 #   - back-api   ← FastAPI (uvicorn), N réplicas — endpoint scaling
 #   - back-worker ← arq workers, M réplicas — FCM push, batch inserts
-#   - front      ← Next.js admin UI (build separado)
-#   - nginx      ← reverse proxy: /api/* → back-api, resto → front
-#   - pgadmin    ← UI Postgres (opcional, solo dev)
+#   - front      ← Next.js admin UI (profile with-front, post-cutover)
+#   - nginx      ← reverse proxy (profile with-nginx)
+#   - pgadmin    ← UI Postgres (profile dev)
+#   - prometheus + grafana ← observabilidad (profile monitoring)
 
 services:
   postgres:
     image: postgres:16-alpine
-    container_name: cognipilot-postgres
+    container_name: cognipilot-postgres-back
     restart: unless-stopped
     environment:
       POSTGRES_USER: ${POSTGRES_USER}
@@ -29,6 +41,7 @@ services:
       retries: 10
     networks:
       - cognipilot-net
+    profiles: ["bundled-db"]  # Solo en modo bundled. En paralelo usamos el postgres del back viejo.
 
   pgbouncer:
     image: edoburu/pgbouncer:1.23.1
@@ -49,6 +62,7 @@ services:
         condition: service_healthy
     networks:
       - cognipilot-net
+    profiles: ["bundled-db"]
 
   redis:
     image: redis:7-alpine
@@ -70,17 +84,16 @@ services:
       context: .
       dockerfile: Dockerfile
     image: cognipilot-back:latest
+    container_name: cognipilot-back-api
     restart: unless-stopped
     depends_on:
-      postgres:
-        condition: service_healthy
       redis:
         condition: service_healthy
     environment:
-      # Para FastAPI usa pgbouncer (transaction pooling)
-      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@pgbouncer:5432/${POSTGRES_DB}
-      # Para Alembic (que necesita sesiones, no pool transaction) usa postgres directo
-      DATABASE_URL_SYNC: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      # URLs configurables desde .env. Default usa host.docker.internal (modo paralelo).
+      # Para modo bundled, override en .env: DATABASE_URL=postgresql+asyncpg://...@pgbouncer:5432/...
+      DATABASE_URL: ${DATABASE_URL}
+      DATABASE_URL_SYNC: ${DATABASE_URL_SYNC}
       REDIS_URL: ${REDIS_URL}
       JWT_SECRET: ${JWT_SECRET}
       JWT_REFRESH_SECRET: ${JWT_REFRESH_SECRET}
@@ -93,14 +106,18 @@ services:
       CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-}
       APP_ENV: ${APP_ENV:-production}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
-    # No exponemos puerto: tráfico entra solo por nginx
+    # Para conectar al postgres que corre en el HOST (modo paralelo)
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    # Puerto externo para validación previa al cutover (cuando nginx esté delante, se puede quitar)
+    ports:
+      - "${BACK_API_PORT:-8001}:8000"
     networks:
       - cognipilot-net
-    deploy:
-      replicas: 2  # Escalable: 'docker compose up -d --scale back-api=4'
 
   back-worker:
     image: cognipilot-back:latest
+    container_name: cognipilot-back-worker
     restart: unless-stopped
     depends_on:
       back-api:
@@ -108,31 +125,26 @@ services:
       redis:
         condition: service_healthy
     environment:
-      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@pgbouncer:5432/${POSTGRES_DB}
-      DATABASE_URL_SYNC: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      DATABASE_URL: ${DATABASE_URL}
+      DATABASE_URL_SYNC: ${DATABASE_URL_SYNC}
       REDIS_URL: ${REDIS_URL}
       JWT_SECRET: ${JWT_SECRET}
       JWT_REFRESH_SECRET: ${JWT_REFRESH_SECRET}
       FIREBASE_SERVICE_ACCOUNT_JSON: ${FIREBASE_SERVICE_ACCOUNT_JSON}
       APP_ENV: ${APP_ENV:-production}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     # Override del CMD del Dockerfile: corre el worker arq en vez de la API
     command: ["arq", "app.workers.tasks.WorkerSettings"]
     networks:
       - cognipilot-net
-    deploy:
-      replicas: 1
 
   front:
-    # Cuando movamos el front a este compose: build context apuntando al repo del front
-    # Por ahora deshabilitado — el front sigue corriendo en su compose viejo.
-    # Descomentar al hacer cutover:
-    # build:
-    #   context: ../cognipilot-remote
-    # image: cognipilot-front:latest
-    image: nginx:1.27-alpine  # placeholder para que el compose valide
+    # Activar al hacer cutover post-validación
+    image: nginx:1.27-alpine  # placeholder
     container_name: cognipilot-front-placeholder
-    profiles: ["disabled"]  # No arranca hasta sacar este profile
+    profiles: ["with-front"]
 
   nginx:
     image: nginx:1.27-alpine
@@ -146,8 +158,7 @@ services:
       - back-api
     networks:
       - cognipilot-net
-    profiles: ["with-nginx"]  # Activar con: docker compose --profile with-nginx up
-    # Healthcheck simple
+    profiles: ["with-nginx"]
     healthcheck:
       test: ["CMD", "nginx", "-t"]
       interval: 30s
@@ -198,7 +209,7 @@ services:
 
   pgadmin:
     image: dpage/pgadmin4:latest
-    container_name: cognipilot-pgadmin
+    container_name: cognipilot-pgadmin-back
     restart: unless-stopped
     environment:
       PGADMIN_DEFAULT_EMAIL: ${PGADMIN_EMAIL:-admin@cognipilot.local}
@@ -206,14 +217,14 @@ services:
       PGADMIN_CONFIG_SERVER_MODE: "False"
       PGADMIN_CONFIG_MASTER_PASSWORD_REQUIRED: "False"
     ports:
-      - "5050:80"
+      - "5051:80"  # 5051 para no chocar con el pgadmin del back viejo
     depends_on:
       - postgres
     volumes:
       - pgadmin_data:/var/lib/pgadmin
     networks:
       - cognipilot-net
-    profiles: ["dev"]  # Solo dev: docker compose --profile dev up
+    profiles: ["dev"]
 
 networks:
   cognipilot-net:
