@@ -14,7 +14,7 @@ from sqlalchemy import (
     String,
     func,
 )
-from sqlalchemy.dialects.postgresql import JSONB, UUID
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.db import Base
@@ -30,13 +30,13 @@ class Regla(Base):
     __tablename__ = "Regla"
 
     id: Mapped[str] = mapped_column(
-        UUID(as_uuid=False), primary_key=True, default=lambda: str(uuid.uuid4())
+        String, primary_key=True, default=lambda: str(uuid.uuid4())
     )
     empresaId: Mapped[str] = mapped_column(
-        UUID(as_uuid=False), ForeignKey("Empresa.id"), nullable=False
+        String, ForeignKey("Empresa.id"), nullable=False
     )
     rutaId: Mapped[str | None] = mapped_column(
-        UUID(as_uuid=False), ForeignKey("Ruta.id"), nullable=True
+        String, ForeignKey("Ruta.id"), nullable=True
     )
     nombre: Mapped[str] = mapped_column(String, nullable=False)
     tipo: Mapped[TipoRegla] = mapped_column(
@@ -68,13 +68,13 @@ class ReglaHistorial(Base):
     __tablename__ = "ReglaHistorial"
 
     id: Mapped[str] = mapped_column(
-        UUID(as_uuid=False), primary_key=True, default=lambda: str(uuid.uuid4())
+        String, primary_key=True, default=lambda: str(uuid.uuid4())
     )
     reglaId: Mapped[str] = mapped_column(
-        UUID(as_uuid=False), ForeignKey("Regla.id"), nullable=False
+        String, ForeignKey("Regla.id"), nullable=False
     )
     usuarioId: Mapped[str] = mapped_column(
-        UUID(as_uuid=False), ForeignKey("Usuario.id"), nullable=False
+        String, ForeignKey("Usuario.id"), nullable=False
     )
     ts: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()

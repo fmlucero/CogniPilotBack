@@ -7,7 +7,6 @@ from decimal import Decimal
 from typing import TYPE_CHECKING
 
 from sqlalchemy import Date, DateTime, ForeignKey, Index, Integer, Numeric, String, UniqueConstraint
-from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.db import Base
@@ -23,10 +22,10 @@ class Ruta(Base):
     __tablename__ = "Ruta"
 
     id: Mapped[str] = mapped_column(
-        UUID(as_uuid=False), primary_key=True, default=lambda: str(uuid.uuid4())
+        String, primary_key=True, default=lambda: str(uuid.uuid4())
     )
     empresaId: Mapped[str] = mapped_column(
-        UUID(as_uuid=False), ForeignKey("Empresa.id"), nullable=False
+        String, ForeignKey("Empresa.id"), nullable=False
     )
     nombre: Mapped[str] = mapped_column(String, nullable=False)
     fecha: Mapped[date] = mapped_column(Date, nullable=False)
@@ -44,10 +43,10 @@ class Parada(Base):
     __tablename__ = "Parada"
 
     id: Mapped[str] = mapped_column(
-        UUID(as_uuid=False), primary_key=True, default=lambda: str(uuid.uuid4())
+        String, primary_key=True, default=lambda: str(uuid.uuid4())
     )
     rutaId: Mapped[str] = mapped_column(
-        UUID(as_uuid=False), ForeignKey("Ruta.id"), nullable=False
+        String, ForeignKey("Ruta.id"), nullable=False
     )
     orden: Mapped[int] = mapped_column(Integer, nullable=False)
     lat: Mapped[Decimal] = mapped_column(Numeric(9, 6), nullable=False)
@@ -65,10 +64,10 @@ class Paquete(Base):
     __tablename__ = "Paquete"
 
     id: Mapped[str] = mapped_column(
-        UUID(as_uuid=False), primary_key=True, default=lambda: str(uuid.uuid4())
+        String, primary_key=True, default=lambda: str(uuid.uuid4())
     )
     paradaId: Mapped[str] = mapped_column(
-        UUID(as_uuid=False), ForeignKey("Parada.id"), nullable=False
+        String, ForeignKey("Parada.id"), nullable=False
     )
     codigoMl: Mapped[str] = mapped_column(String, nullable=False)
     descripcion: Mapped[str | None] = mapped_column(String, nullable=True)
@@ -84,13 +83,13 @@ class Asignacion(Base):
     __tablename__ = "Asignacion"
 
     id: Mapped[str] = mapped_column(
-        UUID(as_uuid=False), primary_key=True, default=lambda: str(uuid.uuid4())
+        String, primary_key=True, default=lambda: str(uuid.uuid4())
     )
     repartidorId: Mapped[str] = mapped_column(
-        UUID(as_uuid=False), ForeignKey("Usuario.id"), nullable=False
+        String, ForeignKey("Usuario.id"), nullable=False
     )
     rutaId: Mapped[str] = mapped_column(
-        UUID(as_uuid=False), ForeignKey("Ruta.id"), nullable=False
+        String, ForeignKey("Ruta.id"), nullable=False
     )
     fecha: Mapped[date] = mapped_column(Date, nullable=False)
 

@@ -16,7 +16,6 @@ from sqlalchemy import (
     String,
     func,
 )
-from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.db import Base
@@ -33,10 +32,10 @@ class Usuario(Base):
     __tablename__ = "Usuario"
 
     id: Mapped[str] = mapped_column(
-        UUID(as_uuid=False), primary_key=True, default=lambda: str(uuid.uuid4())
+        String, primary_key=True, default=lambda: str(uuid.uuid4())
     )
     empresaId: Mapped[str | None] = mapped_column(
-        UUID(as_uuid=False), ForeignKey("Empresa.id"), nullable=True
+        String, ForeignKey("Empresa.id"), nullable=True
     )
     email: Mapped[str] = mapped_column(String, unique=True, nullable=False)
     passwordHash: Mapped[str] = mapped_column(String, nullable=False)
@@ -66,10 +65,10 @@ class Dispositivo(Base):
     __tablename__ = "Dispositivo"
 
     id: Mapped[str] = mapped_column(
-        UUID(as_uuid=False), primary_key=True, default=lambda: str(uuid.uuid4())
+        String, primary_key=True, default=lambda: str(uuid.uuid4())
     )
     usuarioId: Mapped[str] = mapped_column(
-        UUID(as_uuid=False), ForeignKey("Usuario.id"), nullable=False
+        String, ForeignKey("Usuario.id"), nullable=False
     )
     deviceUuid: Mapped[str] = mapped_column(String, unique=True, nullable=False)
     fcmToken: Mapped[str | None] = mapped_column(String, nullable=True)

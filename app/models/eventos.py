@@ -17,7 +17,7 @@ from sqlalchemy import (
     String,
     func,
 )
-from sqlalchemy.dialects.postgresql import JSONB, UUID
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.db import Base
@@ -32,7 +32,7 @@ class EventoApp(Base):
     __tablename__ = "EventoApp"
 
     id: Mapped[str] = mapped_column(
-        UUID(as_uuid=False), primary_key=True, default=lambda: str(uuid.uuid4())
+        String, primary_key=True, default=lambda: str(uuid.uuid4())
     )
     tipo: Mapped[TipoEvento] = mapped_column(
         SAEnum(TipoEvento, name="TipoEvento", create_type=False, native_enum=True),
@@ -42,10 +42,10 @@ class EventoApp(Base):
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
     usuarioId: Mapped[str | None] = mapped_column(
-        UUID(as_uuid=False), ForeignKey("Usuario.id"), nullable=True
+        String, ForeignKey("Usuario.id"), nullable=True
     )
     dispositivoId: Mapped[str | None] = mapped_column(
-        UUID(as_uuid=False), ForeignKey("Dispositivo.id"), nullable=True
+        String, ForeignKey("Dispositivo.id"), nullable=True
     )
     inSchedule: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     screenName: Mapped[str | None] = mapped_column(String, nullable=True)
@@ -71,17 +71,17 @@ class Incidente(Base):
     __tablename__ = "Incidente"
 
     id: Mapped[str] = mapped_column(
-        UUID(as_uuid=False), primary_key=True, default=lambda: str(uuid.uuid4())
+        String, primary_key=True, default=lambda: str(uuid.uuid4())
     )
     repartidorId: Mapped[str] = mapped_column(
-        UUID(as_uuid=False), ForeignKey("Usuario.id"), nullable=False
+        String, ForeignKey("Usuario.id"), nullable=False
     )
     dispositivoId: Mapped[str] = mapped_column(
-        UUID(as_uuid=False), ForeignKey("Dispositivo.id"), nullable=False
+        String, ForeignKey("Dispositivo.id"), nullable=False
     )
-    reglaId: Mapped[str | None] = mapped_column(UUID(as_uuid=False), nullable=True)
+    reglaId: Mapped[str | None] = mapped_column(String, nullable=True)
     paqueteId: Mapped[str | None] = mapped_column(
-        UUID(as_uuid=False), ForeignKey("Paquete.id"), nullable=True
+        String, ForeignKey("Paquete.id"), nullable=True
     )
     ts: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
@@ -102,13 +102,13 @@ class Posicion(Base):
     __tablename__ = "Posicion"
 
     id: Mapped[str] = mapped_column(
-        UUID(as_uuid=False), primary_key=True, default=lambda: str(uuid.uuid4())
+        String, primary_key=True, default=lambda: str(uuid.uuid4())
     )
     repartidorId: Mapped[str] = mapped_column(
-        UUID(as_uuid=False), ForeignKey("Usuario.id"), nullable=False
+        String, ForeignKey("Usuario.id"), nullable=False
     )
     dispositivoId: Mapped[str] = mapped_column(
-        UUID(as_uuid=False), ForeignKey("Dispositivo.id"), nullable=False
+        String, ForeignKey("Dispositivo.id"), nullable=False
     )
     ts: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()

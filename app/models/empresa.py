@@ -6,7 +6,7 @@ from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import Boolean, DateTime, String, func
-from sqlalchemy.dialects.postgresql import JSONB, UUID
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.db import Base
@@ -21,7 +21,7 @@ class Empresa(Base):
     __tablename__ = "Empresa"  # Prisma usa PascalCase para tablas
 
     id: Mapped[str] = mapped_column(
-        UUID(as_uuid=False), primary_key=True, default=lambda: str(uuid.uuid4())
+        String, primary_key=True, default=lambda: str(uuid.uuid4())
     )
     nombre: Mapped[str] = mapped_column(String, unique=True, nullable=False)
     cuit: Mapped[str] = mapped_column(String, unique=True, nullable=False)
