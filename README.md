@@ -23,7 +23,7 @@ Reemplaza los route handlers de `cognipilot-remote` (Next.js). El front Next.js 
 | Métricas store | Prometheus 3 | Scrapea `/metrics` cada 15s, retención 15d |
 | Dashboards OPS | Grafana 11 | Dashboard auto-provisioned con 8 paneles (drill-down técnico) |
 | Dashboards admin | Endpoints JSON `/api/metrics/*` role-protected | Embebidos en el panel web (Next.js), no requieren abrir Grafana |
-| Reverse proxy | nginx | Ruteo `/api` → FastAPI, `/admin` → Next.js (pendiente Fase B) |
+| Reverse proxy | nginx | Ruteo `/api` → FastAPI, `/` → Next.js. Activo en :80 (profile `with-nginx`). |
 | Package mgr | uv | Rust-based, mucho más rápido que pip |
 
 ## Estructura
@@ -70,7 +70,7 @@ cognipilot-back/
 ├── scripts/
 │   ├── baseline_alembic.md         ← Cómo tomar ownership de la DB sin downtime
 │   └── seed.py                     ← Port de prisma/seed.ts (mismo dataset)
-├── nginx/                          ← Config del reverse proxy (pendiente Fase B)
+├── nginx/nginx.conf                ← Config del reverse proxy (activo)
 ├── Dockerfile                      ← Multi-stage, una imagen sirve para API y workers
 ├── docker-compose.yml              ← Stack completo + profiles (monitoring, dev)
 ├── pyproject.toml                  ← Deps (uv-friendly)
@@ -192,15 +192,17 @@ docker compose up -d --scale back-api=4
 | 4 | Seed Python equivalente al de Prisma | ✅ |
 | 5 | arq async para FCM push (`POST /api/schedule` ahora encola) | ✅ |
 | 6 | Endpoints calientes: `POST /api/events/bulk` (bulk insert), `POST /api/positions` (haversine + diff) | ✅ |
-| 7 | Loop periódico que refresca gauges (active_devices, queue_depth) | ✅ |
+| 7 | Loop periódico que refresca gauges (active_devices, queue_depth) — corre dentro de FastAPI | ✅ |
 | 8 | nginx config para reverse proxy (`/api` → FastAPI, resto → Next.js) | ✅ |
-| 9 | Alembic baseline → stamp DB existente | ⏳ |
-| 10 | Levantar `back-api` en paralelo en la VM, validar contra DB real | ⏳ |
-| 11 | Modificar Next.js: drop `app/api/*` + `lib/{prisma,jwt,auth,firebase-admin,password,cuit}.ts`, las páginas hacen fetch a FastAPI | ⏳ |
-| 12 | Cloudflare Tunnel pasa a apuntar a nginx | ⏳ |
-| 13 | Dashboard React en el admin Next.js consumiendo `/api/metrics/*` | ⏳ |
+| 9 | Alembic baseline `5a1e1b850521` → stamp DB existente | ✅ |
+| 10 | `back-api` corriendo en :8001 en la VM, parity validado contra DB real | ✅ |
+| 11A | nginx adelante en :80 (parallel safe). JWT cross-backend validado (cookie de FastAPI → Server Components de Next.js) | ✅ |
+| 11B | Cloudflare Tunnel re-apuntado a nginx (`http://localhost:80`). URL nueva: `https://early-insulation-oxide-call.trycloudflare.com`. App Android updated (commit `0b23581` en repo `CogniPilot`) | ✅ |
+| 12 | Apagar back viejo (`cognipilot-app` container) cuando la APK nueva valide en el celu | ⏳ |
+| 13 | Cleanup Next.js: borrar `app/api/*` (queda dead code, nginx no las llama) y `lib/{prisma,jwt,auth,firebase-admin,password,cuit}.ts`. Refactorear Server Components que aún usan Prisma para hacer fetch a FastAPI. | ⏳ |
+| 14 | Dashboard React en `/admin/metricas` consumiendo `/api/metrics/*` | ⏳ |
 
-Tokens JWT viejos siguen funcionando (mismo HS256, mismo secret, mismas claims) → cuando hagamos el cutover **nadie se desloguea**.
+Tokens JWT viejos siguen funcionando (mismo HS256, mismo secret, mismas claims) → durante el cutover **nadie se desloguea**. Validado end-to-end: cookies emitidas por FastAPI funcionan en Server Components de Next.js sin reconfiguración.
 
 ## Observabilidad
 
@@ -249,7 +251,7 @@ Definidas en `app/core/observability.py`:
 - `cognipilot_events_ingested_total{tipo=...}` — counter por tipo de evento
 - `cognipilot_fcm_push_total{result=success|error}` — push enviados
 - `cognipilot_fcm_push_duration_seconds` — histogram latencia FCM
-- `cognipilot_active_devices{window=5m|24h}` — gauge (actualizado por un job periódico — pendiente)
+- `cognipilot_active_devices{window=5m|24h}` — gauge (actualizado cada 30s por el loop async del lifespan de FastAPI)
 - `cognipilot_arq_queue_depth{queue=...}` — gauge profundidad de cola
 - `cognipilot_arq_jobs_total{status=ok|retry|fail, task=...}` — counter de jobs
 
