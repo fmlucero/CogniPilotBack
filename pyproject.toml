@@ -1,0 +1,42 @@
+[project]
+name = "cognipilot-back"
+version = "0.1.0"
+description = "CogniPilot backend API — FastAPI + SQLAlchemy + Postgres + Redis + arq"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi[standard]>=0.115.0",
+    "uvicorn[standard]>=0.32.0",
+    "sqlalchemy[asyncio]>=2.0.36",
+    "asyncpg>=0.30.0",
+    "psycopg2-binary>=2.9.10",  # solo Alembic (sync); FastAPI usa asyncpg
+    "alembic>=1.13.0",
+    "pydantic>=2.9.0",
+    "pydantic-settings>=2.6.0",
+    "python-jose[cryptography]>=3.3.0",
+    "bcrypt>=4.2.0",
+    "redis>=5.2.0",
+    "arq>=0.26.0",
+    "firebase-admin>=6.5.0",
+    "python-multipart>=0.0.12",
+    "httpx>=0.28.0",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3.0",
+    "pytest-asyncio>=0.24.0",
+    "ruff>=0.7.0",
+    "mypy>=1.13.0",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "N", "ASYNC"]
+ignore = ["E501"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
