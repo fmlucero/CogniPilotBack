@@ -148,6 +148,48 @@ services:
       - cognipilot-net
     profiles: ["with-nginx"]  # Activar con: docker compose --profile with-nginx up
 
+  # ─────────────────────────────────────────────────────────────────────────
+  # Observabilidad — perfil "monitoring"
+  # Levantar con: docker compose --profile monitoring up -d
+  # ─────────────────────────────────────────────────────────────────────────
+
+  prometheus:
+    image: prom/prometheus:v3.0.0
+    container_name: cognipilot-prometheus
+    restart: unless-stopped
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.retention.time=15d"
+      - "--storage.tsdb.path=/prometheus"
+      - "--web.enable-lifecycle"
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    networks:
+      - cognipilot-net
+    profiles: ["monitoring"]
+
+  grafana:
+    image: grafana/grafana:11.3.1
+    container_name: cognipilot-grafana
+    restart: unless-stopped
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+      GF_INSTALL_PLUGINS: ""
+    volumes:
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana_data:/var/lib/grafana
+    ports:
+      - "3001:3000"  # Grafana en :3001 para no chocar con el front Next.js
+    depends_on:
+      - prometheus
+    networks:
+      - cognipilot-net
+    profiles: ["monitoring"]
+
   pgadmin:
     image: dpage/pgadmin4:latest
     container_name: cognipilot-pgadmin
@@ -175,3 +217,5 @@ volumes:
   pgdata:
   pgadmin_data:
   redisdata:
+  prometheus_data:
+  grafana_data:

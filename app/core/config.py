@@ -44,6 +44,9 @@ class Settings(BaseSettings):
     # CORS
     cors_allowed_origins: str = ""  # comma-separated
 
+    # Observabilidad — Prometheus server URL (para queries desde /api/metrics/timeseries)
+    prometheus_url: str = "http://prometheus:9090"
+
     @field_validator("cors_allowed_origins")
     @classmethod
     def _strip_cors(cls, v: str) -> str:

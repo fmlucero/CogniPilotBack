@@ -10,10 +10,13 @@ import logging
 import threading
 from typing import TYPE_CHECKING
 
+import time
+
 import firebase_admin
 from firebase_admin import credentials, messaging
 
 from app.core.config import get_settings
+from app.core.observability import fcm_push_duration_seconds, fcm_push_total
 
 if TYPE_CHECKING:
     pass
@@ -81,6 +84,14 @@ def send_schedule_push(*, enabled: bool, time_from: str, time_to: str, tz: str) 
         ),
     )
 
-    message_id = messaging.send(message)
+    t0 = time.perf_counter()
+    try:
+        message_id = messaging.send(message)
+    except Exception:
+        fcm_push_total.labels(result="error").inc()
+        fcm_push_duration_seconds.observe(time.perf_counter() - t0)
+        raise
+    fcm_push_total.labels(result="success").inc()
+    fcm_push_duration_seconds.observe(time.perf_counter() - t0)
     logger.info("FCM push sent: %s", message_id)
     return message_id

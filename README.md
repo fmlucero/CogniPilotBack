@@ -93,6 +93,57 @@ Plan de cutover sin downtime:
 
 Tokens JWT viejos siguen funcionando (mismo HS256, mismo secret, mismas claims).
 
+## Observabilidad
+
+Dos capas, integradas:
+
+### A) Para el equipo de plataforma (Grafana — drill-down técnico)
+
+Profile `monitoring` en el compose. Levantar con:
+
+```powershell
+docker compose --profile monitoring up -d prometheus grafana
+```
+
+- **Prometheus** (`http://10.201.0.67:9090` interno): scrapea `back-api:8000/metrics` cada 15s. Retención 15 días.
+- **Grafana** (`http://10.201.0.67:3001`): auto-provisiona el datasource Prometheus + dashboard "CogniPilot — Overview" con 8 paneles (req/s, p50/p95/p99, errores, eventos por tipo, FCM success/error).
+- Login: `admin / ${GRAFANA_ADMIN_PASSWORD}`
+
+### B) Para el admin del producto (dentro del panel web)
+
+El back expone endpoints JSON role-protegidos que el admin UI (Next.js) consume:
+
+```
+GET /api/metrics/overview                  # snapshot — cards del dashboard
+GET /api/metrics/timeseries?metric=...     # puntos {ts, value} para line charts
+```
+
+Solo `admin_sistema` por ahora. Métricas disponibles para timeseries:
+
+| `metric` | Qué muestra |
+|---|---|
+| `requests_rate` | Req/s del back (1m rate) |
+| `error_rate` | % de 5xx sobre total (5m) |
+| `latency_p95_ms` | Latencia p95 en ms |
+| `events_rate` | Eventos ingresados/s |
+| `fcm_success_rate` | % de pushes exitosos |
+| `queue_depth` | Jobs encolados en arq |
+
+Parametros: `window=15m|1h|6h|24h|7d`, `step=15..3600` (segundos).
+
+Si Prometheus no está corriendo, los endpoints devuelven `prometheus_available: false` y arrays vacíos (degradación graceful). El `overview` igual devuelve los contadores in-process + counts directos de DB.
+
+### C) Métricas custom de negocio
+
+Definidas en `app/core/observability.py`:
+
+- `cognipilot_events_ingested_total{tipo=...}` — counter por tipo de evento
+- `cognipilot_fcm_push_total{result=success|error}` — push enviados
+- `cognipilot_fcm_push_duration_seconds` — histogram latencia FCM
+- `cognipilot_active_devices{window=5m|24h}` — gauge (actualizado por un job periódico — pendiente)
+- `cognipilot_arq_queue_depth{queue=...}` — gauge profundidad de cola
+- `cognipilot_arq_jobs_total{status=ok|retry|fail, task=...}` — counter de jobs
+
 ## Compatibilidad de auth
 
 Los JWTs emitidos por el back viejo (Next.js) son **bit-compatible** con este back:

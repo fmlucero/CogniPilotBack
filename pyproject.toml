@@ -20,6 +20,9 @@ dependencies = [
     "firebase-admin>=6.5.0",
     "python-multipart>=0.0.12",
     "httpx>=0.28.0",
+    # Observabilidad
+    "prometheus-fastapi-instrumentator>=7.0.0",
+    "prometheus-client>=0.21.0",
 ]
 
 [dependency-groups]

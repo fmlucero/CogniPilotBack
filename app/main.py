@@ -1,6 +1,6 @@
 """CogniPilot Back — FastAPI app entrypoint.
 
-Levanta la app, configura logging, CORS, monta los routers.
+Levanta la app, configura logging, CORS, instrumentación Prometheus, monta routers.
 """
 from __future__ import annotations
 
@@ -11,7 +11,8 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.core.config import get_settings
-from app.routers import auth, devices, empresas, events, health, schedule, usuarios
+from app.core.observability import make_instrumentator
+from app.routers import auth, devices, empresas, events, health, metrics, schedule, usuarios
 
 # Configurar logging
 settings = get_settings()
@@ -53,6 +54,11 @@ if settings.cors_origin_list:
         allow_headers=["*"],
     )
 
+# Prometheus instrumentation — expone /metrics y trackea HTTP automáticamente
+instrumentator = make_instrumentator()
+instrumentator.instrument(app)
+instrumentator.expose(app, endpoint="/metrics", include_in_schema=False)
+
 # Mount routers
 app.include_router(health.router)
 app.include_router(auth.router)
@@ -61,6 +67,7 @@ app.include_router(usuarios.router)
 app.include_router(schedule.router)
 app.include_router(events.router)
 app.include_router(devices.router)
+app.include_router(metrics.router)
 
 
 @app.get("/", include_in_schema=False)

@@ -15,6 +15,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.db import get_session
+from app.core.observability import events_ingested_total
 from app.models.eventos import EventoApp
 from app.models.usuario import Dispositivo
 from app.schemas.evento import (
@@ -65,6 +66,8 @@ async def create_event(
     db.add(evento)
     await db.commit()
     await db.refresh(evento)
+
+    events_ingested_total.labels(tipo=evento.tipo.value).inc()
 
     return {
         "ok": True,
