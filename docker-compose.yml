@@ -156,6 +156,10 @@ services:
       - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
     depends_on:
       - back-api
+    # Para alcanzar al front Next.js que corre en el compose viejo (cognipilot-app:3000)
+    # via el host gateway, hasta que hagamos el cutover completo del front.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     networks:
       - cognipilot-net
     profiles: ["with-nginx"]
