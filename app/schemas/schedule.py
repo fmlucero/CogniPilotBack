@@ -40,5 +40,5 @@ class ScheduleUpdateRequest(BaseModel):
 
 
 class ScheduleUpdateResponse(ScheduleResponse):
-    # Post HU-17 no hay campos extras; el back ya no dispara push.
+    # Post HU-18 no hay campos extras; el back ya no dispara push.
     pass

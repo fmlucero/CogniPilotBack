@@ -1,6 +1,6 @@
 """Endpoints de schedule (ventana horaria) — port de cognipilot-remote/app/api/schedule/route.ts.
 
-Post HU-17: el back ya NO envía push FCM al cambiar el horario. La app
+Post HU-18: el back ya NO envía push FCM al cambiar el horario. La app
 del repartidor consulta este endpoint por polling (foreground cada 30s,
 WorkManager cada 15 min) y detecta el cambio comparando contra su snapshot
 local. Cuando exista, también se enviará via SSE en /api/realtime/stream.
@@ -146,7 +146,7 @@ async def update_schedule(
     await db.commit()
     await db.refresh(regla)
 
-    # Nota: post HU-17 el back NO envía push FCM. La app consulta este
+    # Nota: post HU-18 el back NO envía push FCM. La app consulta este
     # endpoint por polling y detecta el cambio comparando contra el snapshot
     # local. SSE (cuando exista en /api/realtime/stream) hará broadcast a las
     # apps en foreground para latencia <1s.

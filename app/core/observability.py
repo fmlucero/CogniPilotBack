@@ -13,7 +13,7 @@ Dos capas:
 Endpoint `/metrics` queda expuesto (sin auth) sobre la red interna del Docker.
 nginx bloquea acceso externo a esa ruta.
 
-Nota HU-17: las métricas FCM (fcm_push_total, fcm_push_duration_seconds) se
+Nota HU-18: las métricas FCM (fcm_push_total, fcm_push_duration_seconds) se
 removieron al retirar Firebase del stack. Si se implementa SSE, agregar acá
 contadores de conexiones SSE activas y mensajes broadcasted.
 """
@@ -34,7 +34,7 @@ events_ingested_total = Counter(
     labelnames=("tipo",),
 )
 
-# Post HU-17 ya no hay métricas FCM (se removió el sistema de push externo).
+# Post HU-18 ya no hay métricas FCM (se removió el sistema de push externo).
 # Cuando se implemente SSE, agregar contadores de conexiones SSE activas y
 # mensajes broadcasted aquí.
 

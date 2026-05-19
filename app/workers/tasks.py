@@ -2,7 +2,7 @@
 
 Arrancarlo: `arq app.workers.tasks.WorkerSettings`
 
-Post HU-17 NO hay tasks activas (se removió `send_schedule_push_task` cuando
+Post HU-18 NO hay tasks activas (se removió `send_schedule_push_task` cuando
 se retiró Firebase Cloud Messaging del stack). El worker se mantiene corriendo
 para que futuras tasks tengan donde ejecutarse:
 
@@ -23,7 +23,7 @@ _settings = get_settings()
 
 
 class WorkerSettings:
-    """arq Worker config — sin functions activas tras HU-17."""
+    """arq Worker config — sin functions activas tras HU-18."""
 
     functions: list = []  # type: ignore[type-arg]
 
