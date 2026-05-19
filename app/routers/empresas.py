@@ -60,10 +60,13 @@ async def _empresa_with_counts(db: AsyncSession, empresa: Empresa) -> dict[str, 
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-@router.get("", response_model=EmpresaListResponse, dependencies=[Depends(admin_only)])
+@router.get("", dependencies=[Depends(admin_only)])
 async def list_empresas(
     db: Annotated[AsyncSession, Depends(get_session)],
 ) -> dict[str, list[dict]]:
+    # Nota: no usamos response_model=EmpresaListResponse porque Pydantic v2
+    # filtra el campo `_count` (los campos con underscore inicial se tratan
+    # como privados). El dict ya viene formateado con la estructura correcta.
     stmt = select(Empresa).order_by(desc(Empresa.activa), Empresa.nombre.asc())
     empresas = (await db.execute(stmt)).scalars().all()
     serialized = [await _empresa_with_counts(db, e) for e in empresas]
