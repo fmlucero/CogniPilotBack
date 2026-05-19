@@ -38,9 +38,6 @@ class Settings(BaseSettings):
     cookie_secure: bool = False
     cookie_domain: str = ""
 
-    # Firebase Admin (FCM)
-    firebase_service_account_json: str = ""
-
     # CORS
     cors_allowed_origins: str = ""  # comma-separated
 

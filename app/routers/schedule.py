@@ -1,8 +1,9 @@
 """Endpoints de schedule (ventana horaria) — port de cognipilot-remote/app/api/schedule/route.ts.
 
-El push FCM se ENCOLA en arq y se envía desde el worker. Esto saca el
-roundtrip a Google FCM (típicamente 100–300ms) del request path:
-el supervisor recibe respuesta 200 inmediatamente y el push viaja async.
+Post HU-17: el back ya NO envía push FCM al cambiar el horario. La app
+del repartidor consulta este endpoint por polling (foreground cada 30s,
+WorkManager cada 15 min) y detecta el cambio comparando contra su snapshot
+local. Cuando exista, también se enviará via SSE en /api/realtime/stream.
 """
 from __future__ import annotations
 
@@ -14,7 +15,6 @@ from sqlalchemy import desc, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from app.core.arq_client import get_arq_pool
 from app.core.db import get_session
 from app.core.deps import CurrentUser, require_roles
 from app.models.enums import AccionRegla, TipoRegla
@@ -146,33 +146,10 @@ async def update_schedule(
     await db.commit()
     await db.refresh(regla)
 
-    # Encolar el push FCM al worker arq. Si Redis está caído, fallback a sync
-    # para no perder la notificación (con el costo de bloquear unos ms el response).
-    fcm_queued = False
-    fcm_error: str | None = None
-    fcm_message_id: str | None = None
-    try:
-        arq = get_arq_pool()
-        await arq.enqueue_job(
-            "send_schedule_push_task",
-            enabled=body.enabled,
-            time_from=body.time_from,
-            time_to=body.time_to,
-            tz=body.tz,
-        )
-        fcm_queued = True
-    except Exception as e:  # noqa: BLE001
-        logger.warning("arq enqueue failed, falling back to sync FCM: %s", e)
-        from app.services.fcm import send_schedule_push
-        try:
-            fcm_message_id = send_schedule_push(
-                enabled=body.enabled,
-                time_from=body.time_from,
-                time_to=body.time_to,
-                tz=body.tz,
-            )
-        except Exception as e2:  # noqa: BLE001
-            fcm_error = str(e2)
+    # Nota: post HU-17 el back NO envía push FCM. La app consulta este
+    # endpoint por polling y detecta el cambio comparando contra el snapshot
+    # local. SSE (cuando exista en /api/realtime/stream) hará broadcast a las
+    # apps en foreground para latencia <1s.
 
     return ScheduleUpdateResponse(
         enabled=regla.activa,
@@ -181,7 +158,4 @@ async def update_schedule(
         tz=regla.condicion.get("tz"),
         updatedAt=int(regla.updatedAt.timestamp() * 1000),
         updatedBy=current["email"],
-        fcmQueued=fcm_queued,
-        fcmMessageId=fcm_message_id,
-        fcmError=fcm_error,
     )

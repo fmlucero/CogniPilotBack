@@ -7,13 +7,15 @@ Dos capas:
        - http_requests_in_progress (gauge)
   2. Negocio (definido manualmente acá):
        - events_ingested_total
-       - fcm_push_total
-       - fcm_push_duration_seconds
        - active_devices (gauge actualizado con periodicidad)
        - arq_queue_depth, arq_jobs_total
 
 Endpoint `/metrics` queda expuesto (sin auth) sobre la red interna del Docker.
 nginx bloquea acceso externo a esa ruta.
+
+Nota HU-17: las métricas FCM (fcm_push_total, fcm_push_duration_seconds) se
+removieron al retirar Firebase del stack. Si se implementa SSE, agregar acá
+contadores de conexiones SSE activas y mensajes broadcasted.
 """
 from __future__ import annotations
 
@@ -32,17 +34,9 @@ events_ingested_total = Counter(
     labelnames=("tipo",),
 )
 
-fcm_push_total = Counter(
-    "cognipilot_fcm_push_total",
-    "Pushes FCM enviados (incluye fallidos)",
-    labelnames=("result",),  # success | error
-)
-
-fcm_push_duration_seconds = Histogram(
-    "cognipilot_fcm_push_duration_seconds",
-    "Latencia de envío de push FCM",
-    buckets=(0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0),
-)
+# Post HU-17 ya no hay métricas FCM (se removió el sistema de push externo).
+# Cuando se implemente SSE, agregar contadores de conexiones SSE activas y
+# mensajes broadcasted aquí.
 
 active_devices = Gauge(
     "cognipilot_active_devices",

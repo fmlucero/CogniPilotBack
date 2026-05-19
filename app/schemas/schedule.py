@@ -40,6 +40,5 @@ class ScheduleUpdateRequest(BaseModel):
 
 
 class ScheduleUpdateResponse(ScheduleResponse):
-    fcmMessageId: str | None = None
-    fcmError: str | None = None
-    fcmQueued: bool | None = None
+    # Post HU-17 no hay campos extras; el back ya no dispara push.
+    pass

@@ -30,13 +30,6 @@ class DeviceMetrics(BaseModel):
     active_24h: int
 
 
-class FcmMetrics(BaseModel):
-    sent_total: int
-    success_total: int
-    error_total: int
-    success_rate: float | None = None
-
-
 class QueueMetrics(BaseModel):
     depth: int
     jobs_completed_total: int
@@ -48,7 +41,6 @@ class MetricsOverviewResponse(BaseModel):
     http: HttpMetrics
     events: EventMetrics
     devices: DeviceMetrics
-    fcm: FcmMetrics
     queue: QueueMetrics
     prometheus_available: bool
 

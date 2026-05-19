@@ -18,7 +18,7 @@ Reemplaza los route handlers de `cognipilot-remote` (Next.js). El front Next.js 
 | Workers async | arq (asyncio) | Equivalente a BullMQ para Python async |
 | Auth | JWT HS256 (python-jose) | Tokens compatibles con el back Next.js |
 | Hashing | bcrypt (rounds 10) | Compatible con hashes existentes en DB |
-| FCM | firebase-admin | Push notifications a la app Android (notification+data) |
+| Notificaciones | Polling controlado + SSE (HU-17) | Sistema propio que reemplaza a Firebase Cloud Messaging — la app consulta /api/schedule por polling y opcionalmente recibe push real-time por SSE. |
 | Instrumentación | prometheus-fastapi-instrumentator + prometheus-client | Métricas HTTP auto + counters/gauges/histograms de negocio |
 | Métricas store | Prometheus 3 | Scrapea `/metrics` cada 15s, retención 15d |
 | Dashboards OPS | Grafana 11 | Dashboard auto-provisioned con 8 paneles (drill-down técnico) |
@@ -48,18 +48,17 @@ cognipilot-back/
 │   │   ├── auth.py                 ← /api/auth/{login,logout,me,refresh}
 │   │   ├── empresas.py             ← /api/empresas[/{id}]
 │   │   ├── usuarios.py             ← /api/usuarios[/{id}]
-│   │   ├── schedule.py             ← /api/schedule (con FCM push)
+│   │   ├── schedule.py             ← /api/schedule (sin FCM tras HU-17)
 │   │   ├── events.py               ← /api/events (GET + POST)
 │   │   ├── devices.py              ← /api/devices/register
 │   │   └── metrics.py              ← /api/metrics/{overview,timeseries} (admin)
 │   ├── services/
-│   │   ├── fcm.py                  ← Firebase Admin SDK (notification+data)
 │   │   └── prometheus_client.py    ← Cliente HTTP de Prometheus para timeseries
 │   ├── utils/
 │   │   ├── cuit.py                 ← Validación liviana CUIT
 │   │   └── password.py             ← Generador temp 12 chars
 │   └── workers/
-│       └── tasks.py                ← arq WorkerSettings + tasks (FCM, bulk, position)
+│       └── tasks.py                ← arq WorkerSettings (sin tasks activas tras HU-17)
 ├── alembic/                        ← Migraciones DB
 │   ├── env.py, script.py.mako, versions/
 ├── monitoring/                     ← Stack OPS (profile "monitoring")
@@ -117,11 +116,9 @@ uv run python -m scripts.seed
 
 | Endpoint | Modo | Beneficio |
 |---|---|---|
-| `POST /api/schedule` | Encola FCM en arq, responde inmediato | Latencia <20ms (vs ~200ms del sync) |
+| `POST /api/schedule` | Inline. App detecta el cambio por polling (HU-17). | Sin dependencia externa. Latencia <20ms. |
 | `POST /api/events/bulk` | Bulk insert en una transacción, max 500 eventos | Una sola conexión DB, en vez de 500 INSERTs |
 | `POST /api/positions` | Inline con haversine: si difiere <10m de la última, NO inserta fila (solo actualiza `lastLat/lastLng/lastSeen`) | Controla crecimiento de la tabla con repartidor parado |
-
-Si Redis se cae, `POST /api/schedule` hace fallback a sync FCM (no se pierde el push).
 
 ## Background jobs (in-process)
 
@@ -190,7 +187,7 @@ docker compose up -d --scale back-api=4
 | 2 | Endpoints schedule + events + devices/register | ✅ |
 | 3 | Observabilidad (Prometheus + endpoints `/api/metrics`) | ✅ |
 | 4 | Seed Python equivalente al de Prisma | ✅ |
-| 5 | arq async para FCM push (`POST /api/schedule` ahora encola) | ✅ |
+| 5 | arq async para FCM push — **removido en HU-17** (`POST /api/schedule` ya no encola push, la app hace polling) | ✅ (revertido) |
 | 6 | Endpoints calientes: `POST /api/events/bulk` (bulk insert), `POST /api/positions` (haversine + diff) | ✅ |
 | 7 | Loop periódico que refresca gauges (active_devices, queue_depth) — corre dentro de FastAPI | ✅ |
 | 8 | nginx config para reverse proxy (`/api` → FastAPI, resto → Next.js) | ✅ |
@@ -217,7 +214,7 @@ docker compose --profile monitoring up -d prometheus grafana
 ```
 
 - **Prometheus** (`http://10.201.0.67:9090` interno): scrapea `back-api:8000/metrics` cada 15s. Retención 15 días.
-- **Grafana** (`http://10.201.0.67:3001`): auto-provisiona el datasource Prometheus + dashboard "CogniPilot — Overview" con 8 paneles (req/s, p50/p95/p99, errores, eventos por tipo, FCM success/error).
+- **Grafana** (`http://10.201.0.67:3001`): auto-provisiona el datasource Prometheus + dashboard "CogniPilot — Overview" con paneles de req/s, p50/p95/p99, error rate, eventos ingresados por tipo.
 - Login: `admin / ${GRAFANA_ADMIN_PASSWORD}`
 
 ### B) Para el admin del producto (dentro del panel web)
@@ -237,7 +234,6 @@ Solo `admin_sistema` por ahora. Métricas disponibles para timeseries:
 | `error_rate` | % de 5xx sobre total (5m) |
 | `latency_p95_ms` | Latencia p95 en ms |
 | `events_rate` | Eventos ingresados/s |
-| `fcm_success_rate` | % de pushes exitosos |
 | `queue_depth` | Jobs encolados en arq |
 
 Parametros: `window=15m|1h|6h|24h|7d`, `step=15..3600` (segundos).
@@ -249,8 +245,6 @@ Si Prometheus no está corriendo, los endpoints devuelven `prometheus_available:
 Definidas en `app/core/observability.py`:
 
 - `cognipilot_events_ingested_total{tipo=...}` — counter por tipo de evento
-- `cognipilot_fcm_push_total{result=success|error}` — push enviados
-- `cognipilot_fcm_push_duration_seconds` — histogram latencia FCM
 - `cognipilot_active_devices{window=5m|24h}` — gauge (actualizado cada 30s por el loop async del lifespan de FastAPI)
 - `cognipilot_arq_queue_depth{queue=...}` — gauge profundidad de cola
 - `cognipilot_arq_jobs_total{status=ok|retry|fail, task=...}` — counter de jobs

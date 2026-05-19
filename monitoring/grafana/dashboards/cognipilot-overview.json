@@ -101,24 +101,11 @@
     {
       "type": "timeseries",
       "title": "Eventos ingresados por tipo",
-      "gridPos": { "h": 9, "w": 12, "x": 0, "y": 15 },
+      "gridPos": { "h": 9, "w": 24, "x": 0, "y": 15 },
       "targets": [
         {
           "expr": "sum by (tipo) (rate(cognipilot_events_ingested_total[1m]))",
           "legendFormat": "{{tipo}}",
-          "refId": "A"
-        }
-      ],
-      "datasource": { "type": "prometheus", "uid": "prometheus" }
-    },
-    {
-      "type": "timeseries",
-      "title": "FCM push: success vs error",
-      "gridPos": { "h": 9, "w": 12, "x": 12, "y": 15 },
-      "targets": [
-        {
-          "expr": "sum by (result) (rate(cognipilot_fcm_push_total[5m]))",
-          "legendFormat": "{{result}}",
           "refId": "A"
         }
       ],

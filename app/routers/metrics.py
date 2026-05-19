@@ -25,7 +25,6 @@ from app.core.deps import require_roles
 from app.core.observability import (
     arq_jobs_total,
     events_ingested_total,
-    fcm_push_total,
     get_app_uptime_seconds,
     queue_depth,
 )
@@ -33,7 +32,6 @@ from app.models.usuario import Dispositivo
 from app.schemas.metrics import (
     DeviceMetrics,
     EventMetrics,
-    FcmMetrics,
     HttpMetrics,
     MetricsOverviewResponse,
     QueueMetrics,
@@ -97,18 +95,6 @@ async def overview(
     # ── Events ──────────────────────────────────────────────────────────────
     events_total = _counter_total(events_ingested_total)
     events = EventMetrics(ingested_total=events_total)
-
-    # ── FCM ──────────────────────────────────────────────────────────────────
-    fcm_by_result = _counter_by_label(fcm_push_total, "result")
-    fcm_success = fcm_by_result.get("success", 0)
-    fcm_error = fcm_by_result.get("error", 0)
-    fcm_sent = fcm_success + fcm_error
-    fcm = FcmMetrics(
-        sent_total=fcm_sent,
-        success_total=fcm_success,
-        error_total=fcm_error,
-        success_rate=(fcm_success / fcm_sent) if fcm_sent > 0 else None,
-    )
 
     # ── Devices (consulta a DB) ──────────────────────────────────────────────
     now = datetime.now(timezone.utc)
@@ -184,7 +170,6 @@ async def overview(
         http=http_q,
         events=events,
         devices=devices,
-        fcm=fcm,
         queue=qm,
         prometheus_available=prom_ok,
     )
@@ -216,10 +201,6 @@ _KNOWN_METRICS: dict[str, str] = {
         '{handler!="/metrics"}[5m])) by (le))'
     ),
     "events_rate": "sum(rate(cognipilot_events_ingested_total[1m]))",
-    "fcm_success_rate": (
-        "sum(rate(cognipilot_fcm_push_total{result=\"success\"}[5m])) / "
-        "sum(rate(cognipilot_fcm_push_total[5m]))"
-    ),
     "queue_depth": "max(cognipilot_arq_queue_depth)",
 }
 
@@ -230,7 +211,7 @@ _WINDOW_TO_SECONDS = {"15m": 900, "1h": 3600, "6h": 21600, "24h": 86400, "7d": 6
 async def timeseries(
     metric: Annotated[Literal[
         "requests_rate", "error_rate", "latency_p95_ms",
-        "events_rate", "fcm_success_rate", "queue_depth",
+        "events_rate", "queue_depth",
     ], Query()],
     window: Annotated[Literal["15m", "1h", "6h", "24h", "7d"], Query()] = "1h",
     step: Annotated[int, Query(ge=15, le=3600)] = 60,
