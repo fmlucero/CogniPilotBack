@@ -86,14 +86,38 @@ async def update_schedule(
     _: Annotated[Any, Depends(supervisor_or_admin)],
     empresaId: Annotated[str | None, Query()] = None,
 ) -> ScheduleUpdateResponse:
-    # Resolver empresa: admin_sistema necesita ?empresaId=, supervisor usa la suya
+    # Resolver empresa:
+    #  - supervisor: usa la suya (current["empresaId"])
+    #  - admin_sistema: si pasa ?empresaId=, usa esa; si no, fallback a la empresa
+    #    de la regla ventana_horaria más reciente (consistente con el GET, que
+    #    muestra esa misma regla). Útil para el dashboard global del admin sin
+    #    forzarlo a elegir empresa.
     empresa_id = current["empresaId"]
-    if current["rol"] == "admin_sistema" and empresaId:
-        empresa_id = empresaId
+    if current["rol"] == "admin_sistema":
+        if empresaId:
+            empresa_id = empresaId
+        else:
+            most_recent_rule_empresa = (
+                await db.execute(
+                    select(Regla.empresaId)
+                    .where(
+                        Regla.tipo == TipoRegla.ventana_horaria,
+                        Regla.rutaId.is_(None),
+                    )
+                    .order_by(desc(Regla.updatedAt))
+                    .limit(1)
+                )
+            ).scalar_one_or_none()
+            if most_recent_rule_empresa:
+                empresa_id = most_recent_rule_empresa
     if not empresa_id:
         raise HTTPException(
             status_code=422,
-            detail="empresaId required (admin must pass ?empresaId=)",
+            detail=(
+                "No hay una regla de ventana horaria existente para usar como default. "
+                "Como admin_sistema, pasá ?empresaId=<uuid> para crear la primera regla "
+                "de una empresa específica."
+            ),
         )
 
     # Buscar regla existente (única ventana_horaria global de la empresa)
