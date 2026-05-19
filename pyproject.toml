@@ -17,6 +17,7 @@ dependencies = [
     "bcrypt>=4.2.0",
     "redis>=5.2.0",
     "arq>=0.26.0",
+    "sse-starlette>=2.1.3",  # HU-18 fase 4: SSE realtime
     "python-multipart>=0.0.12",
     "httpx>=0.28.0",
     # Observabilidad

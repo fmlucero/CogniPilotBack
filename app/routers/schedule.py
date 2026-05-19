@@ -24,6 +24,7 @@ from app.schemas.schedule import (
     ScheduleUpdateRequest,
     ScheduleUpdateResponse,
 )
+from app.services.realtime import publish_schedule_updated
 
 logger = logging.getLogger(__name__)
 
@@ -146,16 +147,18 @@ async def update_schedule(
     await db.commit()
     await db.refresh(regla)
 
-    # Nota: post HU-18 el back NO envía push FCM. La app consulta este
-    # endpoint por polling y detecta el cambio comparando contra el snapshot
-    # local. SSE (cuando exista en /api/realtime/stream) hará broadcast a las
-    # apps en foreground para latencia <1s.
+    payload = {
+        "enabled": regla.activa,
+        "from": regla.condicion.get("desde"),
+        "to": regla.condicion.get("hasta"),
+        "tz": regla.condicion.get("tz"),
+        "updatedAt": int(regla.updatedAt.timestamp() * 1000),
+        "updatedBy": current["email"],
+    }
 
-    return ScheduleUpdateResponse(
-        enabled=regla.activa,
-        time_from=regla.condicion.get("desde"),
-        time_to=regla.condicion.get("hasta"),
-        tz=regla.condicion.get("tz"),
-        updatedAt=int(regla.updatedAt.timestamp() * 1000),
-        updatedBy=current["email"],
-    )
+    # Broadcast SSE — apps suscritas a /api/realtime/stream reciben el cambio
+    # en <100ms. Es best-effort: si Redis está caído, la app igual lo detecta
+    # via polling de ScheduleSyncWorker (cada 15 min) o foreground (30s).
+    await publish_schedule_updated(payload)
+
+    return ScheduleUpdateResponse(**payload)

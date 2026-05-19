@@ -28,6 +28,7 @@ from app.routers import (
     health,
     metrics,
     positions,
+    realtime,
     schedule,
     usuarios,
 )
@@ -165,6 +166,7 @@ app.include_router(schedule.router)
 app.include_router(events.router)
 app.include_router(devices.router)
 app.include_router(positions.router)
+app.include_router(realtime.router)
 app.include_router(metrics.router)
 
 
