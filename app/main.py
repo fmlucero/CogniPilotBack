@@ -26,6 +26,7 @@ from app.routers import (
     empresas,
     events,
     health,
+    me,
     metrics,
     positions,
     realtime,
@@ -168,6 +169,7 @@ app.include_router(devices.router)
 app.include_router(positions.router)
 app.include_router(realtime.router)
 app.include_router(metrics.router)
+app.include_router(me.router)
 
 
 @app.get("/", include_in_schema=False)

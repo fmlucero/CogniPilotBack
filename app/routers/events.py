@@ -15,6 +15,7 @@ from sqlalchemy import insert, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.db import get_session
+from app.core.deps import CurrentUser
 from app.core.observability import events_ingested_total
 from app.models.eventos import EventoApp
 from app.models.usuario import Dispositivo
@@ -31,29 +32,38 @@ router = APIRouter(prefix="/api/events", tags=["events"])
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# POST /api/events
+# POST /api/events — HU-03: auth obligatoria (Bearer)
 # ─────────────────────────────────────────────────────────────────────────────
 
 
 @router.post("", status_code=201, response_model=EventCreateResponse)
 async def create_event(
     body: EventCreateRequest,
+    current: CurrentUser,
     db: Annotated[AsyncSession, Depends(get_session)],
 ) -> dict[str, Any]:
+    usuario_id = current["sub"]
     dispositivo_id: str | None = None
-    usuario_id: str | None = None
 
+    # El deviceUuid del body debe pertenecer al usuario auth.
+    # (defensa en profundidad: el JWT identifica al usuario, el deviceUuid al hardware)
     if body.deviceUuid:
         dev = (
             await db.execute(
-                select(Dispositivo).where(Dispositivo.deviceUuid == body.deviceUuid)
+                select(Dispositivo).where(
+                    Dispositivo.deviceUuid == body.deviceUuid,
+                    Dispositivo.usuarioId == usuario_id,
+                )
             )
         ).scalar_one_or_none()
-        if dev is not None:
-            dispositivo_id = dev.id
-            usuario_id = dev.usuarioId
-            # Touch lastSeen (sin tocar lastLat/Lng — eso va por /api/positions)
-            dev.lastSeen = datetime.now(timezone.utc)
+        if dev is None:
+            raise HTTPException(
+                status_code=403,
+                detail="deviceUuid no pertenece al usuario autenticado",
+            )
+        dispositivo_id = dev.id
+        # Touch lastSeen (sin tocar lastLat/Lng — eso va por /api/positions)
+        dev.lastSeen = datetime.now(timezone.utc)
 
     evento = EventoApp(
         tipo=body.type,
@@ -96,6 +106,7 @@ async def create_event(
 
 @router.get("", response_model=EventsListResponse)
 async def list_events(
+    current: CurrentUser,
     db: Annotated[AsyncSession, Depends(get_session)],
     since: Annotated[int | None, Query()] = None,
 ) -> dict[str, Any]:
@@ -133,38 +144,38 @@ async def list_events(
 @router.post("/bulk", status_code=202, response_model=BulkEventsResponse)
 async def bulk_events(
     body: BulkEventsRequest,
+    current: CurrentUser,
     db: Annotated[AsyncSession, Depends(get_session)],
 ) -> BulkEventsResponse:
     """Ingesta de hasta 500 eventos en una sola transacción.
 
-    Optimizaciones:
-      - Una sola consulta para resolver todos los deviceUuids únicos
-      - Bulk INSERT de eventos
-      - Touch lastSeen de los dispositivos involucrados en una sola UPDATE
-
-    El device se queda con la última hora de inserción en `lastSeen`.
+    HU-03: requiere Bearer. Todos los eventos quedan asociados al usuario auth.
+    Los deviceUuids del body que no pertenezcan al usuario se descartan silenciosamente
+    (no rompe el batch — la app puede llevar dos dispositivos en distintos momentos).
     """
-    # 1) Recolectar deviceUuids únicos y resolverlos a dispositivo_id + usuario_id
+    usuario_id = current["sub"]
+
+    # 1) Recolectar deviceUuids únicos y resolverlos al usuario auth
     uuids = {e.deviceUuid for e in body.events if e.deviceUuid}
-    dev_map: dict[str, tuple[str, str]] = {}
+    dev_map: dict[str, str] = {}
     if uuids:
         devs = (
             await db.execute(
-                select(Dispositivo.id, Dispositivo.usuarioId, Dispositivo.deviceUuid).where(
-                    Dispositivo.deviceUuid.in_(uuids)
+                select(Dispositivo.id, Dispositivo.deviceUuid).where(
+                    Dispositivo.deviceUuid.in_(uuids),
+                    Dispositivo.usuarioId == usuario_id,
                 )
             )
         ).all()
-        dev_map = {d.deviceUuid: (d.id, d.usuarioId) for d in devs}
+        dev_map = {d.deviceUuid: d.id for d in devs}
 
     # 2) Armar las filas para bulk insert
     rows: list[dict[str, Any]] = []
     touched_devices: set[str] = set()
     for ev in body.events:
         dispositivo_id: str | None = None
-        usuario_id: str | None = None
         if ev.deviceUuid and ev.deviceUuid in dev_map:
-            dispositivo_id, usuario_id = dev_map[ev.deviceUuid]
+            dispositivo_id = dev_map[ev.deviceUuid]
             touched_devices.add(dispositivo_id)
         rows.append({
             "tipo": ev.type,
