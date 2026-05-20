@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import (
@@ -49,11 +49,21 @@ class Regla(Base):
     )
     condicion: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
     activa: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="true")
+    # default Python además del server_default: la tabla heredada de Prisma no tiene
+    # default en DB (Prisma maneja @updatedAt a nivel ORM), así que los INSERTs directos
+    # de SQLAlchemy no obtienen el valor automáticamente. Ver I-20 en COGNIPILOT_STATUS.md.
     createdAt: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now()
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+        server_default=func.now(),
     )
     updatedAt: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+        server_default=func.now(),
     )
 
     # Relationships
