@@ -18,10 +18,12 @@ from sqlalchemy.orm import selectinload
 
 from app.core.db import get_session
 from app.core.deps import CurrentUser
+from app.core.security import hash_password, verify_password
 from app.models.operacion import Asignacion, Paquete, Parada, Ruta
 from app.models.regla import Regla
 from app.models.usuario import Usuario
 from app.schemas.me import (
+    ChangePasswordRequest,
     MiRutaResponse,
     MisReglasResponse,
     PaqueteOut,
@@ -160,3 +162,42 @@ async def my_rules(
             for r in reglas
         ]
     )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# POST /api/me/password — cambiar password propia (HU-24)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+@router.post("/password", status_code=status.HTTP_204_NO_CONTENT)
+async def change_my_password(
+    body: ChangePasswordRequest,
+    current: CurrentUser,
+    db: Annotated[AsyncSession, Depends(get_session)],
+) -> None:
+    """Cualquier rol autenticado puede cambiar su propia contraseña.
+
+    Validación:
+      - currentPassword debe matchear el hash actual (bcrypt)
+      - newPassword ≥ 8 chars y distinta de la actual
+    """
+    if len(body.newPassword) < 8:
+        raise HTTPException(
+            status_code=422, detail="La nueva contraseña debe tener al menos 8 caracteres"
+        )
+    if body.newPassword == body.currentPassword:
+        raise HTTPException(
+            status_code=400, detail="La nueva contraseña debe ser distinta a la actual"
+        )
+
+    user = (
+        await db.execute(select(Usuario).where(Usuario.id == current["sub"]))
+    ).scalar_one_or_none()
+    if user is None or not user.activo:
+        raise HTTPException(status_code=403, detail="Usuario no válido")
+
+    if not verify_password(body.currentPassword, user.passwordHash):
+        raise HTTPException(status_code=400, detail="Contraseña actual incorrecta")
+
+    user.passwordHash = hash_password(body.newPassword)
+    await db.commit()

@@ -51,3 +51,9 @@ class ReglaOut(BaseModel):
 class MisReglasResponse(BaseModel):
     """Respuesta de GET /api/me/reglas."""
     reglas: list[ReglaOut]
+
+
+class ChangePasswordRequest(BaseModel):
+    """Cambio de password propia (HU-24). Auth requerida; cualquier rol puede usarlo."""
+    currentPassword: str
+    newPassword: str
