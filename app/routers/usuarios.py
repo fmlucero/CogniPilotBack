@@ -6,6 +6,7 @@ Reglas de acceso:
 """
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -19,10 +20,17 @@ from app.core.deps import CurrentUser, require_roles
 from app.core.security import hash_password
 from app.models.empresa import Empresa
 from app.models.enums import Rol
+from app.models.eventos import EventoApp
+from app.models.operacion import Asignacion, Ruta
 from app.models.usuario import Dispositivo, Usuario
 from app.schemas.usuario import (
+    AsignacionSummary,
+    ConnectionState,
+    DispositivoSummary,
+    EventoSummary,
     UsuarioCreateRequest,
     UsuarioCreateResponse,
+    UsuarioDetailResponse,
     UsuarioListResponse,
     UsuarioPatchRequest,
     UsuarioResponse,
@@ -31,11 +39,33 @@ from app.utils.password import generate_temp_password
 
 router = APIRouter(prefix="/api/usuarios", tags=["usuarios"])
 
-# Cualquiera de los dos roles puede listar; las restricciones por rol van adentro
 auth_admin_or_super = require_roles("admin_sistema", "supervisor")
 
 
-def _to_response(u: Usuario, empresa_nombre: str | None, dispositivos: int) -> UsuarioResponse:
+def _ms(dt: datetime) -> int:
+    return int(dt.timestamp() * 1000)
+
+
+def _compute_connection_state(
+    dispositivos: list[Dispositivo],
+) -> tuple[ConnectionState, int | None]:
+    """Estado de conexión derivado del max(lastSeen) entre todos los dispositivos del usuario."""
+    if not dispositivos:
+        return ConnectionState.offline, None
+    last_seen = max(d.lastSeen for d in dispositivos)
+    now = datetime.now(timezone.utc)
+    delta = now - last_seen
+    if delta < timedelta(minutes=5):
+        state = ConnectionState.online
+    elif delta < timedelta(hours=24):
+        state = ConnectionState.active_today
+    else:
+        state = ConnectionState.offline
+    return state, _ms(last_seen)
+
+
+def _to_response(u: Usuario, empresa_nombre: str | None) -> UsuarioResponse:
+    state, last_seen = _compute_connection_state(u.dispositivos)
     return UsuarioResponse(
         id=u.id,
         email=u.email,
@@ -44,8 +74,10 @@ def _to_response(u: Usuario, empresa_nombre: str | None, dispositivos: int) -> U
         empresaId=u.empresaId,
         empresaNombre=empresa_nombre,
         activo=u.activo,
-        dispositivos=dispositivos,
-        createdAt=int(u.createdAt.timestamp() * 1000),
+        dispositivos=len(u.dispositivos),
+        connectionState=state,
+        lastSeen=last_seen,
+        createdAt=_ms(u.createdAt),
     )
 
 
@@ -73,10 +105,115 @@ async def list_usuarios(
     usuarios = (await db.execute(stmt)).scalars().all()
     return {
         "usuarios": [
-            _to_response(u, u.empresa.nombre if u.empresa else None, len(u.dispositivos))
+            _to_response(u, u.empresa.nombre if u.empresa else None)
             for u in usuarios
         ]
     }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# GET /api/usuarios/{id}  — detalle (HU-22) + estado conexión (HU-23)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+@router.get("/{usuario_id}", response_model=UsuarioDetailResponse)
+async def get_usuario(
+    usuario_id: str,
+    current: CurrentUser,
+    db: Annotated[AsyncSession, Depends(get_session)],
+    _: Annotated[Any, Depends(auth_admin_or_super)],
+) -> UsuarioDetailResponse:
+    target = (
+        await db.execute(
+            select(Usuario)
+            .options(
+                selectinload(Usuario.empresa),
+                selectinload(Usuario.dispositivos),
+            )
+            .where(Usuario.id == usuario_id)
+        )
+    ).scalar_one_or_none()
+    if target is None:
+        raise HTTPException(status_code=404, detail="Usuario no existe")
+
+    # Supervisor solo ve usuarios de su empresa
+    if current["rol"] == "supervisor" and target.empresaId != current["empresaId"]:
+        raise HTTPException(status_code=403, detail="Sin permiso para ver este usuario")
+
+    # Asignaciones: últimas 20, con ruta
+    asignaciones_rows = (
+        await db.execute(
+            select(Asignacion, Ruta)
+            .join(Ruta, Asignacion.rutaId == Ruta.id)
+            .where(Asignacion.repartidorId == target.id)
+            .order_by(Asignacion.fecha.desc())
+            .limit(20)
+        )
+    ).all()
+
+    # Eventos recientes: últimos 30
+    eventos = (
+        (
+            await db.execute(
+                select(EventoApp)
+                .where(EventoApp.usuarioId == target.id)
+                .order_by(EventoApp.ts.desc())
+                .limit(30)
+            )
+        )
+        .scalars()
+        .all()
+    )
+
+    state, last_seen = _compute_connection_state(target.dispositivos)
+
+    return UsuarioDetailResponse(
+        id=target.id,
+        email=target.email,
+        nombre=target.nombre,
+        rol=target.rol,
+        empresaId=target.empresaId,
+        empresaNombre=target.empresa.nombre if target.empresa else None,
+        activo=target.activo,
+        connectionState=state,
+        lastSeen=last_seen,
+        createdAt=_ms(target.createdAt),
+        dispositivos=[
+            DispositivoSummary(
+                id=d.id,
+                deviceUuid=d.deviceUuid,
+                modelo=d.modelo,
+                osVersion=d.osVersion,
+                appVersion=d.appVersion,
+                activo=d.activo,
+                lastSeen=_ms(d.lastSeen),
+                lastLat=float(d.lastLat) if d.lastLat is not None else None,
+                lastLng=float(d.lastLng) if d.lastLng is not None else None,
+                createdAt=_ms(d.createdAt),
+            )
+            for d in sorted(target.dispositivos, key=lambda x: x.lastSeen, reverse=True)
+        ],
+        asignaciones=[
+            AsignacionSummary(
+                id=a.id,
+                rutaId=r.id,
+                rutaNombre=r.nombre,
+                fecha=a.fecha.isoformat(),
+            )
+            for a, r in asignaciones_rows
+        ],
+        eventosRecientes=[
+            EventoSummary(
+                id=e.id,
+                tipo=e.tipo,
+                ts=_ms(e.ts),
+                screenName=e.screenName,
+                appPackage=e.appPackage,
+                inSchedule=e.inSchedule,
+            )
+            for e in eventos
+        ],
+    )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -95,7 +232,6 @@ async def create_usuario(
     rol = body.rol
     empresa_id: str | None = body.empresaId
 
-    # Reglas de empresaId según rol
     if rol == Rol.admin_sistema:
         empresa_id = None
     else:
@@ -109,7 +245,6 @@ async def create_usuario(
         if not empresa.activa:
             raise HTTPException(status_code=422, detail="Empresa inactiva")
 
-    # Restricciones del supervisor
     if current["rol"] == "supervisor":
         if rol != Rol.repartidor:
             raise HTTPException(
@@ -121,7 +256,6 @@ async def create_usuario(
                 detail="El supervisor solo puede crear usuarios en su empresa",
             )
 
-    # Password
     plain = body.password.strip() if body.password else None
     generated = False
     if not plain:
@@ -150,10 +284,10 @@ async def create_usuario(
             status_code=status.HTTP_409_CONFLICT,
             detail={"error": "Ya existe un usuario con ese email", "conflict": "email"},
         ) from e
-    await db.refresh(usuario, attribute_names=["empresa"])
+    await db.refresh(usuario, attribute_names=["empresa", "dispositivos"])
 
     return UsuarioCreateResponse(
-        usuario=_to_response(usuario, usuario.empresa.nombre if usuario.empresa else None, 0),
+        usuario=_to_response(usuario, usuario.empresa.nombre if usuario.empresa else None),
         tempPassword=plain,
         passwordGenerated=generated,
     )
@@ -182,7 +316,6 @@ async def patch_usuario(
     if target is None:
         raise HTTPException(status_code=404, detail="Usuario no existe")
 
-    # Supervisor solo puede operar sobre repartidores de su misma empresa
     if current["rol"] == "supervisor":
         if target.rol != Rol.repartidor or target.empresaId != current["empresaId"]:
             raise HTTPException(
@@ -233,7 +366,6 @@ async def patch_usuario(
         target.activo = body.activo
         updates_applied = True
 
-    # Password
     if body.password is not None:
         if len(body.password) < 8:
             raise HTTPException(
@@ -259,7 +391,6 @@ async def patch_usuario(
         "usuario": _to_response(
             target,
             target.empresa.nombre if target.empresa else None,
-            len(target.dispositivos),
         ).model_dump(),
         "tempPassword": temp_password,
         "passwordGenerated": generated,
