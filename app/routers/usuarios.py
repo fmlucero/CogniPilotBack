@@ -42,8 +42,17 @@ router = APIRouter(prefix="/api/usuarios", tags=["usuarios"])
 auth_admin_or_super = require_roles("admin_sistema", "supervisor")
 
 
+def _aware_utc(dt: datetime) -> datetime:
+    """Normaliza a tz-aware UTC. Las columnas heredadas de Prisma vienen tz-naive
+    aunque el modelo SQLAlchemy las declare como DateTime(timezone=True);
+    asumimos UTC para los datos viejos (que es como Prisma los guardó)."""
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
 def _ms(dt: datetime) -> int:
-    return int(dt.timestamp() * 1000)
+    return int(_aware_utc(dt).timestamp() * 1000)
 
 
 def _compute_connection_state(
@@ -52,7 +61,7 @@ def _compute_connection_state(
     """Estado de conexión derivado del max(lastSeen) entre todos los dispositivos del usuario."""
     if not dispositivos:
         return ConnectionState.offline, None
-    last_seen = max(d.lastSeen for d in dispositivos)
+    last_seen = _aware_utc(max(d.lastSeen for d in dispositivos))
     now = datetime.now(timezone.utc)
     delta = now - last_seen
     if delta < timedelta(minutes=5):
@@ -61,7 +70,7 @@ def _compute_connection_state(
         state = ConnectionState.active_today
     else:
         state = ConnectionState.offline
-    return state, _ms(last_seen)
+    return state, int(last_seen.timestamp() * 1000)
 
 
 def _to_response(u: Usuario, empresa_nombre: str | None) -> UsuarioResponse:
