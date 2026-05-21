@@ -56,3 +56,37 @@ class TimeseriesResponse(BaseModel):
     step: str
     points: list[TimeseriesPoint]
     prometheus_available: bool
+
+
+# ─── HU-14 — KPIs históricos para el gerente ─────────────────────────────────
+
+
+class KpisRange(BaseModel):
+    start: int  # ms epoch
+    end: int
+
+
+class KpisByDay(BaseModel):
+    date: str          # ISO YYYY-MM-DD
+    count: int
+
+
+class KpisByType(BaseModel):
+    tipo: str
+    count: int
+
+
+class KpisTopUser(BaseModel):
+    usuarioId: str | None
+    usuarioNombre: str | None
+    empresaNombre: str | None
+    count: int
+
+
+class KpisResponse(BaseModel):
+    range: KpisRange
+    events_total: int
+    active_users: int     # usuarios distintos con al menos un evento en el rango
+    by_day: list[KpisByDay]
+    by_type: list[KpisByType]
+    top_users: list[KpisTopUser]

@@ -30,6 +30,7 @@ from app.routers import (
     metrics,
     positions,
     realtime,
+    reportes,
     schedule,
     usuarios,
 )
@@ -169,6 +170,7 @@ app.include_router(devices.router)
 app.include_router(positions.router)
 app.include_router(realtime.router)
 app.include_router(metrics.router)
+app.include_router(reportes.router)
 app.include_router(me.router)
 
 

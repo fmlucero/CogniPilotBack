@@ -15,24 +15,31 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from typing import Annotated, Literal
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
 from app.core.db import get_session
-from app.core.deps import require_roles
+from app.core.deps import CurrentUser, require_roles
 from app.core.observability import (
     arq_jobs_total,
     events_ingested_total,
     get_app_uptime_seconds,
     queue_depth,
 )
-from app.models.usuario import Dispositivo
+from app.models.eventos import EventoApp
+from app.models.usuario import Dispositivo, Usuario
+from app.models.empresa import Empresa
 from app.schemas.metrics import (
     DeviceMetrics,
     EventMetrics,
     HttpMetrics,
+    KpisByDay,
+    KpisByType,
+    KpisRange,
+    KpisResponse,
+    KpisTopUser,
     MetricsOverviewResponse,
     QueueMetrics,
     ServerInfo,
@@ -231,4 +238,137 @@ async def timeseries(
         step=f"{step}s",
         points=points,
         prometheus_available=len(points) > 0,
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# GET /api/metrics/kpis — HU-14: agregados sobre EventoApp para la home del gerente.
+# Scope: admin global, supervisor/gerente su empresa (?empresaId=<otra> → 403),
+# repartidor 403.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _ms_to_dt(ms: int) -> datetime:
+    return datetime.fromtimestamp(ms / 1000, tz=timezone.utc)
+
+
+@router.get("/kpis", response_model=KpisResponse)
+async def kpis(
+    current: CurrentUser,
+    db: Annotated[AsyncSession, Depends(get_session)],
+    from_: Annotated[int | None, Query(alias="from")] = None,
+    to: Annotated[int | None, Query()] = None,
+    empresaId: Annotated[str | None, Query()] = None,
+    usuarioId: Annotated[str | None, Query()] = None,
+) -> KpisResponse:
+    rol = current["rol"]
+    if rol == "repartidor":
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+    # Rango default: últimos 7 días
+    now = datetime.now(timezone.utc)
+    range_to = _ms_to_dt(to) if to else now
+    range_from = _ms_to_dt(from_) if from_ else (range_to - timedelta(days=7))
+    if range_from > range_to:
+        raise HTTPException(status_code=422, detail="`from` debe ser anterior a `to`")
+
+    # Scope por empresa
+    empresa_scope: str | None = None
+    if rol == "admin_sistema":
+        empresa_scope = empresaId
+    else:  # supervisor o gerente
+        if not current["empresaId"]:
+            raise HTTPException(status_code=403, detail="Usuario sin empresa asignada")
+        if empresaId and empresaId != current["empresaId"]:
+            raise HTTPException(status_code=403, detail="Solo podés ver KPIs de tu propia empresa")
+        empresa_scope = current["empresaId"]
+
+    # Subquery del filtro común por usuario/empresa
+    base_filters = [EventoApp.ts >= range_from, EventoApp.ts <= range_to]
+    if empresa_scope is not None:
+        base_filters.append(
+            EventoApp.usuarioId.in_(
+                select(Usuario.id).where(Usuario.empresaId == empresa_scope)
+            )
+        )
+    if usuarioId is not None:
+        base_filters.append(EventoApp.usuarioId == usuarioId)
+
+    # 1) Total + active users
+    totals_row = (
+        await db.execute(
+            select(
+                func.count(EventoApp.id),
+                func.count(func.distinct(EventoApp.usuarioId)),
+            ).where(*base_filters)
+        )
+    ).one()
+    events_total = int(totals_row[0] or 0)
+    active_users = int(totals_row[1] or 0)
+
+    # 2) Por día (date_trunc 'day' en UTC)
+    by_day_rows = (
+        await db.execute(
+            select(
+                func.date_trunc("day", EventoApp.ts).label("day"),
+                func.count(EventoApp.id),
+            )
+            .where(*base_filters)
+            .group_by("day")
+            .order_by("day")
+        )
+    ).all()
+    by_day = [
+        KpisByDay(date=row[0].date().isoformat(), count=int(row[1]))
+        for row in by_day_rows if row[0] is not None
+    ]
+
+    # 3) Por tipo
+    by_type_rows = (
+        await db.execute(
+            select(EventoApp.tipo, func.count(EventoApp.id))
+            .where(*base_filters)
+            .group_by(EventoApp.tipo)
+            .order_by(func.count(EventoApp.id).desc())
+        )
+    ).all()
+    by_type = [KpisByType(tipo=row[0].value, count=int(row[1])) for row in by_type_rows]
+
+    # 4) Top usuarios (limit 10)
+    top_rows = (
+        await db.execute(
+            select(
+                EventoApp.usuarioId,
+                Usuario.nombre,
+                Empresa.nombre,
+                func.count(EventoApp.id),
+            )
+            .join(Usuario, EventoApp.usuarioId == Usuario.id, isouter=True)
+            .join(Empresa, Usuario.empresaId == Empresa.id, isouter=True)
+            .where(*base_filters)
+            .group_by(EventoApp.usuarioId, Usuario.nombre, Empresa.nombre)
+            .order_by(func.count(EventoApp.id).desc())
+            .limit(10)
+        )
+    ).all()
+    top_users = [
+        KpisTopUser(
+            usuarioId=row[0],
+            usuarioNombre=row[1],
+            empresaNombre=row[2],
+            count=int(row[3]),
+        )
+        for row in top_rows
+    ]
+
+    return KpisResponse(
+        range=KpisRange(
+            start=int(range_from.timestamp() * 1000),
+            end=int(range_to.timestamp() * 1000),
+        ),
+        events_total=events_total,
+        active_users=active_users,
+        by_day=by_day,
+        by_type=by_type,
+        top_users=top_users,
     )
