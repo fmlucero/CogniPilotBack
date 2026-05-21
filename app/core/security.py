@@ -18,31 +18,45 @@ from jose import JWTError, jwt
 from app.core.config import get_settings
 
 
-class AccessPayload(TypedDict):
-    """Access token claims (Next.js compatible)."""
-    sub: str            # usuario.id (UUID)
+class AccessPayload(TypedDict, total=False):
+    """Access token claims (Next.js compatible).
+
+    `impersonated_by` aparece solo en sesiones de impersonación (HU-34) y
+    contiene el `usuario.id` del admin original. Se preserva en refresh para
+    que la sesión sobreviva al ciclo de refresh transparente.
+    """
+    sub: str            # usuario.id (UUID) — el USER VISIBLE (target en impersonación)
     email: str
     rol: str            # "admin_sistema" | "supervisor" | "gerente" | "repartidor"
     empresaId: str | None
     iat: int
     exp: int
+    impersonated_by: str | None  # HU-34: id del admin original; ausente o None si no es impersonación
 
 
-class RefreshPayload(TypedDict):
+class RefreshPayload(TypedDict, total=False):
     sub: str
     type: Literal["refresh"]
     iat: int
     exp: int
+    impersonated_by: str | None  # HU-34
 
 
 def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def sign_access(sub: str, email: str, rol: str, empresa_id: str | None) -> str:
+def sign_access(
+    sub: str,
+    email: str,
+    rol: str,
+    empresa_id: str | None,
+    *,
+    impersonated_by: str | None = None,
+) -> str:
     settings = get_settings()
     now = _now()
-    payload = {
+    payload: dict = {
         "sub": sub,
         "email": email,
         "rol": rol,
@@ -50,18 +64,22 @@ def sign_access(sub: str, email: str, rol: str, empresa_id: str | None) -> str:
         "iat": int(now.timestamp()),
         "exp": int((now + timedelta(minutes=settings.access_token_ttl_min)).timestamp()),
     }
+    if impersonated_by:
+        payload["impersonated_by"] = impersonated_by
     return jwt.encode(payload, settings.jwt_secret, algorithm=settings.jwt_algorithm)
 
 
-def sign_refresh(sub: str) -> str:
+def sign_refresh(sub: str, *, impersonated_by: str | None = None) -> str:
     settings = get_settings()
     now = _now()
-    payload = {
+    payload: dict = {
         "sub": sub,
         "type": "refresh",
         "iat": int(now.timestamp()),
         "exp": int((now + timedelta(days=settings.refresh_token_ttl_days)).timestamp()),
     }
+    if impersonated_by:
+        payload["impersonated_by"] = impersonated_by
     return jwt.encode(payload, settings.jwt_refresh_secret, algorithm=settings.jwt_algorithm)
 
 

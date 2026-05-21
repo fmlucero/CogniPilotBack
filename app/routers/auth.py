@@ -25,12 +25,16 @@ from app.core.security import (
     verify_refresh,
 )
 from app.models.usuario import Dispositivo, Usuario
+from app.models.enums import Rol
 from app.schemas.auth import (
+    ImpersonateResponse,
+    ImpersonatingInfo,
     LoginRequest,
     LoginResponse,
     MeResponse,
     RefreshRequest,
     RefreshResponse,
+    StopImpersonatingResponse,
     UserResponse,
 )
 from fastapi import Depends
@@ -185,6 +189,16 @@ async def me(
     ).scalar_one_or_none()
     if user is None or not user.activo:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Unauthorized")
+
+    impersonating: ImpersonatingInfo | None = None
+    admin_id = current.get("impersonated_by")
+    if admin_id:
+        admin = (
+            await db.execute(select(Usuario).where(Usuario.id == admin_id))
+        ).scalar_one_or_none()
+        if admin is not None:
+            impersonating = ImpersonatingInfo(adminId=admin.id, adminEmail=admin.email)
+
     return MeResponse(
         user=UserResponse(
             id=user.id,
@@ -192,7 +206,8 @@ async def me(
             nombre=user.nombre,
             rol=user.rol,
             empresaId=user.empresaId,
-        )
+        ),
+        impersonating=impersonating,
     )
 
 
@@ -222,9 +237,131 @@ async def refresh(
     if user is None or not user.activo:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Unauthorized")
 
-    new_access = sign_access(user.id, user.email, user.rol.value, user.empresaId)
-    new_refresh = sign_refresh(user.id)
+    # HU-34: preservar el claim impersonated_by entre refreshes para no
+    # romper la sesión de impersonación cuando el access token vence.
+    impersonated_by = payload.get("impersonated_by")
+    new_access = sign_access(
+        user.id, user.email, user.rol.value, user.empresaId,
+        impersonated_by=impersonated_by,
+    )
+    new_refresh = sign_refresh(user.id, impersonated_by=impersonated_by)
 
     _set_auth_cookies(response, new_access, new_refresh)
 
     return RefreshResponse(accessToken=new_access, refreshToken=new_refresh)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# HU-34 — Impersonación admin → supervisor/gerente
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+@router.post("/impersonate/{user_id}", response_model=ImpersonateResponse)
+async def impersonate(
+    user_id: str,
+    current: CurrentUser,
+    response: Response,
+    request: Request,
+    db: Annotated[AsyncSession, Depends(get_session)],
+) -> ImpersonateResponse:
+    """Sólo admin_sistema puede impersonar. Target debe ser supervisor o
+    gerente (jamás otro admin ni un repartidor). No se puede anidar."""
+    if current["rol"] != "admin_sistema":
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Solo admin_sistema puede impersonar")
+    if current.get("impersonated_by"):
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Ya hay una impersonación activa; salí antes de iniciar otra")
+
+    admin_id = current["sub"]
+    if user_id == admin_id:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No podés impersonarte a vos mismo")
+
+    target = (
+        await db.execute(select(Usuario).where(Usuario.id == user_id))
+    ).scalar_one_or_none()
+    if target is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Usuario no encontrado")
+    if not target.activo:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Usuario inactivo")
+    if target.rol not in (Rol.supervisor, Rol.gerente):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Solo se puede impersonar supervisores o gerentes",
+        )
+
+    access = sign_access(
+        target.id, target.email, target.rol.value, target.empresaId,
+        impersonated_by=admin_id,
+    )
+    refresh = sign_refresh(target.id, impersonated_by=admin_id)
+    _set_auth_cookies(response, access, refresh)
+
+    log_audit(
+        "impersonation_start",
+        admin_id=admin_id,
+        admin_email=current.get("email"),
+        target_id=target.id,
+        target_email=target.email,
+        target_rol=target.rol.value,
+        ip=_client_ip(request),
+    )
+
+    return ImpersonateResponse(
+        user=UserResponse(
+            id=target.id,
+            email=target.email,
+            nombre=target.nombre,
+            rol=target.rol,
+            empresaId=target.empresaId,
+        ),
+        accessToken=access,
+        refreshToken=refresh,
+        impersonating=ImpersonatingInfo(adminId=admin_id, adminEmail=current.get("email") or ""),
+    )
+
+
+@router.post("/stop-impersonating", response_model=StopImpersonatingResponse)
+async def stop_impersonating(
+    current: CurrentUser,
+    response: Response,
+    request: Request,
+    db: Annotated[AsyncSession, Depends(get_session)],
+) -> StopImpersonatingResponse:
+    """Cierra la sesión impersonada y restaura tokens del admin original."""
+    admin_id = current.get("impersonated_by")
+    if not admin_id:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No hay una sesión de impersonación activa")
+
+    admin = (
+        await db.execute(select(Usuario).where(Usuario.id == admin_id))
+    ).scalar_one_or_none()
+    if admin is None or not admin.activo:
+        # Caso patológico: el admin fue desactivado mientras impersonaba.
+        # Limpiamos las cookies y forzamos re-login.
+        response.delete_cookie(key=ACCESS_COOKIE, path="/")
+        response.delete_cookie(key=REFRESH_COOKIE, path="/")
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Admin original no disponible — re-loguear")
+
+    access = sign_access(admin.id, admin.email, admin.rol.value, admin.empresaId)
+    refresh = sign_refresh(admin.id)
+    _set_auth_cookies(response, access, refresh)
+
+    log_audit(
+        "impersonation_stop",
+        admin_id=admin.id,
+        admin_email=admin.email,
+        target_id=current["sub"],
+        target_email=current.get("email"),
+        ip=_client_ip(request),
+    )
+
+    return StopImpersonatingResponse(
+        user=UserResponse(
+            id=admin.id,
+            email=admin.email,
+            nombre=admin.nombre,
+            rol=admin.rol,
+            empresaId=admin.empresaId,
+        ),
+        accessToken=access,
+        refreshToken=refresh,
+    )

@@ -38,8 +38,16 @@ class LoginResponse(BaseModel):
     refreshToken: str
 
 
+class ImpersonatingInfo(BaseModel):
+    """HU-34: presente en /me y en respuestas de impersonate cuando hay un admin
+    enmascarado detrás del usuario visible."""
+    adminId: str
+    adminEmail: str
+
+
 class MeResponse(BaseModel):
     user: UserResponse
+    impersonating: ImpersonatingInfo | None = None
 
 
 class RefreshRequest(BaseModel):
@@ -48,5 +56,20 @@ class RefreshRequest(BaseModel):
 
 
 class RefreshResponse(BaseModel):
+    accessToken: str
+    refreshToken: str
+
+
+class ImpersonateResponse(BaseModel):
+    """HU-34 — POST /api/auth/impersonate/{user_id}"""
+    user: UserResponse
+    accessToken: str
+    refreshToken: str
+    impersonating: ImpersonatingInfo
+
+
+class StopImpersonatingResponse(BaseModel):
+    """HU-34 — POST /api/auth/stop-impersonating"""
+    user: UserResponse
     accessToken: str
     refreshToken: str
