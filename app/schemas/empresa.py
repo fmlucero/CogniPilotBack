@@ -79,3 +79,53 @@ class EmpresaPatchRequest(BaseModel):
         if not is_valid_cuit(v):
             raise ValueError("CUIT inválido")
         return format_cuit(v)
+
+
+# ─── HU-33 — detalle completo de empresa ─────────────────────────────────────
+
+
+class EmpresaUsuarioSummary(BaseModel):
+    id: str
+    nombre: str
+    email: str
+    rol: str
+    activo: bool
+    connectionState: str          # online | active_today | offline
+    lastSeen: int | None          # ms epoch
+    dispositivos: int
+
+
+class EmpresaRutaSummary(BaseModel):
+    id: str
+    nombre: str
+    fecha: str                    # ISO YYYY-MM-DD
+
+
+class EmpresaReglaSummary(BaseModel):
+    id: str
+    nombre: str
+    tipo: str
+    accion: str
+    activa: bool
+    rutaId: str | None
+    updatedAt: int                # ms epoch
+
+
+class EmpresaKpi(BaseModel):
+    events_total_7d: int
+    active_users_7d: int
+    devices_active_5m: int
+    devices_active_24h: int
+
+
+class EmpresaDetailResponse(BaseModel):
+    id: str
+    nombre: str
+    cuit: str
+    contacto: dict | None
+    activa: bool
+    createdAt: int                # ms epoch
+    usuarios: list[EmpresaUsuarioSummary]
+    rutas: list[EmpresaRutaSummary]
+    reglas: list[EmpresaReglaSummary]
+    kpi: EmpresaKpi

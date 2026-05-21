@@ -4,24 +4,32 @@ Solo admin_sistema. CUIT validado liviano (11 dígitos, sin módulo 11).
 """
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import desc, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from app.core.db import get_session
 from app.core.deps import require_roles
 from app.models.empresa import Empresa
+from app.models.eventos import EventoApp
 from app.models.regla import Regla
 from app.models.operacion import Ruta
-from app.models.usuario import Usuario
+from app.models.usuario import Dispositivo, Usuario
 from app.schemas.empresa import (
     EmpresaCreateRequest,
+    EmpresaDetailResponse,
+    EmpresaKpi,
     EmpresaListResponse,
     EmpresaPatchRequest,
+    EmpresaReglaSummary,
     EmpresaResponse,
+    EmpresaRutaSummary,
+    EmpresaUsuarioSummary,
 )
 
 router = APIRouter(prefix="/api/empresas", tags=["empresas"])
@@ -182,3 +190,150 @@ async def patch_empresa(
         ) from e
     await db.refresh(empresa)
     return {"empresa": await _empresa_with_counts(db, empresa)}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# GET /api/empresas/{id}/detalle — HU-33: vista completa de la empresa
+#   Devuelve datos + usuarios (con connectionState) + rutas + reglas + kpi 7d.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _aware_utc(dt: datetime) -> datetime:
+    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+
+def _connection_state(last_seen: datetime, now: datetime) -> str:
+    delta = now - _aware_utc(last_seen)
+    if delta < timedelta(minutes=5):
+        return "online"
+    if delta < timedelta(hours=24):
+        return "active_today"
+    return "offline"
+
+
+@router.get("/{empresa_id}/detalle", response_model=EmpresaDetailResponse, dependencies=[Depends(admin_only)])
+async def get_empresa_detalle(
+    empresa_id: str,
+    db: Annotated[AsyncSession, Depends(get_session)],
+) -> EmpresaDetailResponse:
+    empresa = (
+        await db.execute(select(Empresa).where(Empresa.id == empresa_id))
+    ).scalar_one_or_none()
+    if empresa is None:
+        raise HTTPException(status_code=404, detail="No encontrada")
+
+    now = datetime.now(timezone.utc)
+
+    # Usuarios + dispositivos (para connectionState y count)
+    usuarios = (
+        await db.execute(
+            select(Usuario)
+            .options(selectinload(Usuario.dispositivos))
+            .where(Usuario.empresaId == empresa_id)
+            .order_by(Usuario.activo.desc(), Usuario.rol.asc(), Usuario.nombre.asc())
+        )
+    ).scalars().all()
+
+    usuarios_summary: list[EmpresaUsuarioSummary] = []
+    for u in usuarios:
+        if u.dispositivos:
+            last_seen_dt = max(d.lastSeen for d in u.dispositivos)
+            state = _connection_state(last_seen_dt, now)
+            last_seen_ms: int | None = int(_aware_utc(last_seen_dt).timestamp() * 1000)
+        else:
+            state = "offline"
+            last_seen_ms = None
+        usuarios_summary.append(EmpresaUsuarioSummary(
+            id=u.id,
+            nombre=u.nombre,
+            email=u.email,
+            rol=u.rol.value,
+            activo=u.activo,
+            connectionState=state,
+            lastSeen=last_seen_ms,
+            dispositivos=len(u.dispositivos),
+        ))
+
+    # Rutas (próximas + recientes, sin paginación por ahora — son pocas)
+    rutas = (
+        await db.execute(
+            select(Ruta)
+            .where(Ruta.empresaId == empresa_id)
+            .order_by(Ruta.fecha.desc())
+            .limit(50)
+        )
+    ).scalars().all()
+    rutas_summary = [
+        EmpresaRutaSummary(id=r.id, nombre=r.nombre, fecha=r.fecha.isoformat())
+        for r in rutas
+    ]
+
+    # Reglas
+    reglas = (
+        await db.execute(
+            select(Regla)
+            .where(Regla.empresaId == empresa_id)
+            .order_by(Regla.activa.desc(), Regla.updatedAt.desc())
+        )
+    ).scalars().all()
+    reglas_summary = [
+        EmpresaReglaSummary(
+            id=r.id,
+            nombre=r.nombre,
+            tipo=r.tipo.value,
+            accion=r.accion.value,
+            activa=r.activa,
+            rutaId=r.rutaId,
+            updatedAt=int(_aware_utc(r.updatedAt).timestamp() * 1000),
+        )
+        for r in reglas
+    ]
+
+    # KPI 7 días
+    cutoff_7d = now - timedelta(days=7)
+    cutoff_5m = now - timedelta(minutes=5)
+    cutoff_24h = now - timedelta(hours=24)
+    usuario_ids_subq = select(Usuario.id).where(Usuario.empresaId == empresa_id)
+
+    kpi_row = (
+        await db.execute(
+            select(
+                func.count(EventoApp.id),
+                func.count(func.distinct(EventoApp.usuarioId)),
+            )
+            .where(EventoApp.ts >= cutoff_7d, EventoApp.usuarioId.in_(usuario_ids_subq))
+        )
+    ).one()
+    events_total_7d = int(kpi_row[0] or 0)
+    active_users_7d = int(kpi_row[1] or 0)
+
+    devices_5m = (
+        await db.execute(
+            select(func.count(Dispositivo.id))
+            .where(Dispositivo.lastSeen >= cutoff_5m, Dispositivo.usuarioId.in_(usuario_ids_subq))
+        )
+    ).scalar() or 0
+    devices_24h = (
+        await db.execute(
+            select(func.count(Dispositivo.id))
+            .where(Dispositivo.lastSeen >= cutoff_24h, Dispositivo.usuarioId.in_(usuario_ids_subq))
+        )
+    ).scalar() or 0
+
+    return EmpresaDetailResponse(
+        id=empresa.id,
+        nombre=empresa.nombre,
+        cuit=empresa.cuit,
+        contacto=empresa.contacto,
+        activa=empresa.activa,
+        createdAt=int(_aware_utc(empresa.createdAt).timestamp() * 1000),
+        usuarios=usuarios_summary,
+        rutas=rutas_summary,
+        reglas=reglas_summary,
+        kpi=EmpresaKpi(
+            events_total_7d=events_total_7d,
+            active_users_7d=active_users_7d,
+            devices_active_5m=int(devices_5m),
+            devices_active_24h=int(devices_24h),
+        ),
+    )
