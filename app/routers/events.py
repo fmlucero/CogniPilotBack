@@ -134,6 +134,7 @@ async def list_events(
     to: Annotated[int | None, Query()] = None,
     usuarioId: Annotated[str | None, Query()] = None,
     empresaId: Annotated[str | None, Query()] = None,
+    tipo: Annotated[str | None, Query()] = None,  # HU-13: lista comma-separated de TipoEvento
 ) -> dict[str, Any]:
     # HU-30: scope por rol.
     #   - admin_sistema: ve todo; puede filtrar por empresa con ?empresaId=
@@ -193,6 +194,21 @@ async def list_events(
             stmt = stmt.where(EventoApp.ts <= _ms_to_dt(to))
         except (OverflowError, OSError, ValueError) as e:
             raise HTTPException(status_code=422, detail="to must be a number") from e
+
+    # HU-13: filtro por tipo (lista comma-separated).
+    if tipo is not None:
+        wanted: list[Any] = []
+        from app.models.enums import TipoEvento as _TE
+        for raw in tipo.split(","):
+            raw = raw.strip()
+            if not raw:
+                continue
+            try:
+                wanted.append(_TE(raw))
+            except ValueError as e:
+                raise HTTPException(status_code=422, detail=f"tipo desconocido: {raw}") from e
+        if wanted:
+            stmt = stmt.where(EventoApp.tipo.in_(wanted))
 
     eventos = (await db.execute(stmt)).scalars().all()
     events = [

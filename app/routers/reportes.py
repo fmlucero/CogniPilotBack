@@ -58,6 +58,7 @@ async def export_eventos_csv(
     to: Annotated[int | None, Query()] = None,
     empresaId: Annotated[str | None, Query()] = None,
     usuarioId: Annotated[str | None, Query()] = None,
+    tipo: Annotated[str | None, Query()] = None,  # HU-37: filtro de tipos (comma-separated)
 ) -> StreamingResponse:
     rol = current["rol"]
     if rol == "repartidor":
@@ -98,6 +99,21 @@ async def export_eventos_csv(
         )
     if usuarioId is not None:
         stmt = stmt.where(EventoApp.usuarioId == usuarioId)
+
+    # HU-37: filtro por tipo (lista comma-separated)
+    if tipo is not None:
+        from app.models.enums import TipoEvento as _TE
+        wanted = []
+        for raw in tipo.split(","):
+            raw = raw.strip()
+            if not raw:
+                continue
+            try:
+                wanted.append(_TE(raw))
+            except ValueError as e:
+                raise HTTPException(status_code=422, detail=f"tipo desconocido: {raw}") from e
+        if wanted:
+            stmt = stmt.where(EventoApp.tipo.in_(wanted))
 
     eventos = (await db.execute(stmt)).scalars().all()
 
