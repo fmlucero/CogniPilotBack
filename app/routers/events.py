@@ -13,12 +13,13 @@ from typing import Annotated, Any
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import insert, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from app.core.db import get_session
 from app.core.deps import CurrentUser
 from app.core.observability import events_ingested_total
 from app.models.eventos import EventoApp
-from app.models.usuario import Dispositivo
+from app.models.usuario import Dispositivo, Usuario
 from app.schemas.evento import (
     BulkEventsRequest,
     BulkEventsResponse,
@@ -110,7 +111,13 @@ async def list_events(
     db: Annotated[AsyncSession, Depends(get_session)],
     since: Annotated[int | None, Query()] = None,
 ) -> dict[str, Any]:
-    stmt = select(EventoApp).order_by(EventoApp.ts.asc()).limit(200)
+    # HU-29: traemos usuario + empresa para que el feed muestre quién hizo qué.
+    stmt = (
+        select(EventoApp)
+        .options(selectinload(EventoApp.usuario).selectinload(Usuario.empresa))
+        .order_by(EventoApp.ts.asc())
+        .limit(200)
+    )
     if since is not None:
         try:
             since_dt = datetime.fromtimestamp(since / 1000, tz=timezone.utc)
@@ -130,6 +137,11 @@ async def list_events(
             appPackage=e.appPackage,
             keywords=e.keywords,
             screenText=e.screenText,
+            usuarioId=e.usuario.id if e.usuario else None,
+            usuarioEmail=e.usuario.email if e.usuario else None,
+            usuarioNombre=e.usuario.nombre if e.usuario else None,
+            empresaId=e.usuario.empresa.id if (e.usuario and e.usuario.empresa) else None,
+            empresaNombre=e.usuario.empresa.nombre if (e.usuario and e.usuario.empresa) else None,
         ).model_dump()
         for e in eventos
     ]

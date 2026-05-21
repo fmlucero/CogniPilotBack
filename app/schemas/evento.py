@@ -18,7 +18,12 @@ class EventCreateRequest(BaseModel):
 
 
 class EventCompactResponse(BaseModel):
-    """Salida en el formato compat con el admin web (timestamp en ms)."""
+    """Salida en el formato compat con el admin web (timestamp en ms).
+
+    HU-29: agregamos `usuario*` y `empresa*` para que el feed muestre quién
+    hizo cada evento. Para eventos históricos sin usuarioId (de antes de HU-03),
+    los campos van en None y el front los pinta como "anónimo".
+    """
     id: str
     type: TipoEvento
     timestamp: int
@@ -28,6 +33,11 @@ class EventCompactResponse(BaseModel):
     appPackage: str | None = None
     keywords: list[str]
     screenText: list[str]
+    usuarioId: str | None = None
+    usuarioEmail: str | None = None
+    usuarioNombre: str | None = None
+    empresaId: str | None = None
+    empresaNombre: str | None = None
 
 
 class EventsListResponse(BaseModel):
