@@ -36,3 +36,26 @@ PositionBulkRequest.model_rebuild()
 class PositionReportResponse(BaseModel):
     inserted: bool      # True si difería del último (se insertó); False si solo se actualizó lastSeen/lastLat/Lng
     queuedJobId: str | None = None
+
+
+# ─── HU-11 — mapa de flota ──────────────────────────────────────────────────
+
+
+class FleetPosition(BaseModel):
+    """Última posición conocida de un repartidor (por dispositivo más activo)."""
+    usuarioId: str
+    usuarioNombre: str
+    usuarioEmail: str
+    empresaId: str | None
+    empresaNombre: str | None
+    dispositivoId: str
+    deviceUuid: str
+    lat: float
+    lng: float
+    lastSeen: int                 # ms epoch
+    connectionState: str          # online | active_today | offline
+
+
+class FleetPositionsResponse(BaseModel):
+    positions: list[FleetPosition]
+    serverTime: int               # ms epoch
