@@ -100,9 +100,18 @@ async def create_event(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# GET /api/events?since=<ms>  → eventos con ts > since
-# GET /api/events             → últimos 200
+# GET /api/events
+#   ?since=<ms>         eventos con ts > since (polling incremental)
+#   ?from=<ms>&to=<ms>  rango temporal (HU-30, para drill-down histórico)
+#   ?usuarioId=<id>     filtrar por un repartidor específico (HU-30)
+#   ?empresaId=<id>     admin only — filtrar a una empresa (HU-30); supervisor/gerente
+#                       siempre van filtrados a SU empresa
+# Sin params: últimos 200 dentro del scope que corresponde al rol.
 # ─────────────────────────────────────────────────────────────────────────────
+
+
+def _ms_to_dt(ms: int) -> datetime:
+    return datetime.fromtimestamp(ms / 1000, tz=timezone.utc)
 
 
 @router.get("", response_model=EventsListResponse)
@@ -110,7 +119,32 @@ async def list_events(
     current: CurrentUser,
     db: Annotated[AsyncSession, Depends(get_session)],
     since: Annotated[int | None, Query()] = None,
+    from_: Annotated[int | None, Query(alias="from")] = None,
+    to: Annotated[int | None, Query()] = None,
+    usuarioId: Annotated[str | None, Query()] = None,
+    empresaId: Annotated[str | None, Query()] = None,
 ) -> dict[str, Any]:
+    # HU-30: scope por rol.
+    #   - admin_sistema: ve todo; puede filtrar por empresa con ?empresaId=
+    #   - supervisor / gerente: siempre limitado a su empresa (?empresaId=<otra> → 403)
+    #   - repartidor: 403 (no consume el feed de admin)
+    rol = current["rol"]
+    if rol == "repartidor":
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+    empresa_scope: str | None = None
+    if rol == "admin_sistema":
+        empresa_scope = empresaId  # puede ser None → sin filtro
+    else:  # supervisor o gerente
+        if not current["empresaId"]:
+            raise HTTPException(status_code=403, detail="Usuario sin empresa asignada")
+        if empresaId and empresaId != current["empresaId"]:
+            raise HTTPException(
+                status_code=403,
+                detail="Solo podés ver eventos de tu propia empresa",
+            )
+        empresa_scope = current["empresaId"]
+
     # HU-29: traemos usuario + empresa para que el feed muestre quién hizo qué.
     stmt = (
         select(EventoApp)
@@ -118,12 +152,36 @@ async def list_events(
         .order_by(EventoApp.ts.asc())
         .limit(200)
     )
+
+    if empresa_scope is not None:
+        # subquery evita problemas con eager loading + join explícito
+        stmt = stmt.where(
+            EventoApp.usuarioId.in_(
+                select(Usuario.id).where(Usuario.empresaId == empresa_scope)
+            )
+        )
+
+    if usuarioId is not None:
+        stmt = stmt.where(EventoApp.usuarioId == usuarioId)
+
     if since is not None:
         try:
-            since_dt = datetime.fromtimestamp(since / 1000, tz=timezone.utc)
+            since_dt = _ms_to_dt(since)
         except (OverflowError, OSError, ValueError) as e:
             raise HTTPException(status_code=422, detail="since must be a number") from e
         stmt = stmt.where(EventoApp.ts > since_dt)
+
+    if from_ is not None:
+        try:
+            stmt = stmt.where(EventoApp.ts >= _ms_to_dt(from_))
+        except (OverflowError, OSError, ValueError) as e:
+            raise HTTPException(status_code=422, detail="from must be a number") from e
+
+    if to is not None:
+        try:
+            stmt = stmt.where(EventoApp.ts <= _ms_to_dt(to))
+        except (OverflowError, OSError, ValueError) as e:
+            raise HTTPException(status_code=422, detail="to must be a number") from e
 
     eventos = (await db.execute(stmt)).scalars().all()
     events = [
