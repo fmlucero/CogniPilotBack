@@ -90,3 +90,20 @@ class KpisResponse(BaseModel):
     by_day: list[KpisByDay]
     by_type: list[KpisByType]
     top_users: list[KpisTopUser]
+
+
+# ─── HU-38 — salud del sistema ───────────────────────────────────────────────
+
+
+class HealthService(BaseModel):
+    name: str
+    status: str           # up | down | unknown
+    detail: str | None = None     # mensaje breve del check (ej. "ping 12ms", "timeout")
+
+
+class HealthResponse(BaseModel):
+    services: list[HealthService]
+    uptime_seconds: float
+    eventos_lag_seconds: float | None   # delta entre now y max(EventoApp.ts); null si no hay eventos
+    devices_active_5m: int
+    checked_at: int       # ms epoch del chequeo

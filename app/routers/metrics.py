@@ -34,6 +34,8 @@ from app.models.empresa import Empresa
 from app.schemas.metrics import (
     DeviceMetrics,
     EventMetrics,
+    HealthResponse,
+    HealthService,
     HttpMetrics,
     KpisByDay,
     KpisByType,
@@ -371,4 +373,89 @@ async def kpis(
         by_day=by_day,
         by_type=by_type,
         top_users=top_users,
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# GET /api/metrics/health — HU-38: salud del sistema (containers + lag)
+# Admin only. Hace checks contra cada servicio dependiente del back y
+# devuelve un snapshot de estado + lag de eventos para detectar app-side
+# silencios.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+@router.get("/health", response_model=HealthResponse, dependencies=[Depends(admin_only)])
+async def system_health(
+    db: Annotated[AsyncSession, Depends(get_session)],
+) -> HealthResponse:
+    import time as _time
+    import httpx as _httpx
+    from app.core.arq_client import get_arq_pool
+    from app.core.config import get_settings as _gs
+    from app.models.eventos import EventoApp
+
+    services: list[HealthService] = []
+
+    # back-api: estamos respondiendo, ergo up
+    services.append(HealthService(name="back-api", status="up", detail="self-check"))
+
+    # postgres: SELECT 1
+    pg_t0 = _time.perf_counter()
+    try:
+        from sqlalchemy import text as _text
+        await db.execute(_text("SELECT 1"))
+        services.append(HealthService(name="postgres", status="up", detail=f"{(_time.perf_counter() - pg_t0) * 1000:.0f}ms"))
+    except Exception as e:  # noqa: BLE001
+        services.append(HealthService(name="postgres", status="down", detail=str(e)[:120]))
+
+    # redis: PING via el pool de arq (reuse de la conexión existente)
+    try:
+        pool = get_arq_pool()
+        r_t0 = _time.perf_counter()
+        ok = await pool.ping()  # type: ignore[attr-defined]
+        services.append(HealthService(
+            name="redis",
+            status="up" if ok else "down",
+            detail=f"{(_time.perf_counter() - r_t0) * 1000:.0f}ms",
+        ))
+    except Exception as e:  # noqa: BLE001
+        services.append(HealthService(name="redis", status="down", detail=str(e)[:120]))
+
+    # prometheus: GET prometheus:9090/-/healthy
+    prom_url = (_gs().prometheus_url or "http://prometheus:9090").rstrip("/")
+    try:
+        async with _httpx.AsyncClient(timeout=3.0) as cli:
+            p_t0 = _time.perf_counter()
+            r = await cli.get(f"{prom_url}/-/healthy")
+            services.append(HealthService(
+                name="prometheus",
+                status="up" if r.status_code == 200 else "down",
+                detail=f"HTTP {r.status_code} · {(_time.perf_counter() - p_t0) * 1000:.0f}ms",
+            ))
+    except Exception as e:  # noqa: BLE001
+        services.append(HealthService(name="prometheus", status="unknown", detail=str(e)[:120]))
+
+    # eventos lag — cuánto hace del último evento ingestado
+    last_ts_row = (
+        await db.execute(select(func.max(EventoApp.ts)))
+    ).scalar()
+    eventos_lag_seconds: float | None = None
+    if last_ts_row is not None:
+        last = last_ts_row if last_ts_row.tzinfo else last_ts_row.replace(tzinfo=timezone.utc)
+        eventos_lag_seconds = max(0.0, (datetime.now(timezone.utc) - last).total_seconds())
+
+    # devices activos en 5min (snapshot, mismo cutoff que /overview)
+    cutoff_5m = datetime.now(timezone.utc) - timedelta(minutes=5)
+    devices_5m = (
+        await db.execute(
+            select(func.count(Dispositivo.id)).where(Dispositivo.lastSeen >= cutoff_5m)
+        )
+    ).scalar() or 0
+
+    return HealthResponse(
+        services=services,
+        uptime_seconds=get_app_uptime_seconds(),
+        eventos_lag_seconds=eventos_lag_seconds,
+        devices_active_5m=int(devices_5m),
+        checked_at=int(datetime.now(timezone.utc).timestamp() * 1000),
     )
