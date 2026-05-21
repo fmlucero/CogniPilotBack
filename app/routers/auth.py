@@ -10,10 +10,11 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Annotated
 
-from fastapi import APIRouter, Cookie, HTTPException, Response, status
+from fastapi import APIRouter, Cookie, HTTPException, Request, Response, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.audit import log_audit
 from app.core.config import get_settings
 from app.core.db import get_session
 from app.core.deps import ACCESS_COOKIE, REFRESH_COOKIE, CurrentUser
@@ -68,21 +69,33 @@ def _set_auth_cookies(response: Response, access: str, refresh: str) -> None:
 # ─────────────────────────────────────────────────────────────────────────────
 
 
+def _client_ip(request: Request) -> str | None:
+    """Resolver IP del cliente respetando X-Forwarded-For (nginx adelante)."""
+    fwd = request.headers.get("x-forwarded-for")
+    if fwd:
+        return fwd.split(",")[0].strip()
+    return request.client.host if request.client else None
+
+
 @router.post("/login", response_model=LoginResponse)
 async def login(
     body: LoginRequest,
+    request: Request,
     response: Response,
     db: Annotated[AsyncSession, Depends(get_session)],
 ) -> LoginResponse:
     email = body.email.lower()
+    ip = _client_ip(request)
 
     stmt = select(Usuario).where(Usuario.email == email)
     user = (await db.execute(stmt)).scalar_one_or_none()
 
     if user is None or not user.activo:
+        log_audit("login_failed", email=email, reason="user_not_found_or_inactive", ip=ip)
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials")
 
     if not verify_password(body.password, user.passwordHash):
+        log_audit("login_failed", email=email, usuario_id=user.id, reason="bad_password", ip=ip)
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials")
 
     # Auto-registrar/actualizar dispositivo si vino con deviceUuid (app Android)
@@ -120,6 +133,16 @@ async def login(
     refresh = sign_refresh(user.id)
 
     _set_auth_cookies(response, access, refresh)
+
+    log_audit(
+        "login_ok",
+        usuario_id=user.id,
+        email=user.email,
+        rol=user.rol.value,
+        empresa_id=user.empresaId,
+        dispositivo_id=dispositivo_id,
+        ip=ip,
+    )
 
     return LoginResponse(
         user=UserResponse(

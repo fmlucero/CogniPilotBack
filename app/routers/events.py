@@ -15,6 +15,7 @@ from sqlalchemy import insert, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from app.core.audit import log_audit
 from app.core.db import get_session
 from app.core.deps import CurrentUser
 from app.core.observability import events_ingested_total
@@ -81,6 +82,16 @@ async def create_event(
     await db.refresh(evento)
 
     events_ingested_total.labels(tipo=evento.tipo.value).inc()
+    log_audit(
+        "event_ingested",
+        usuario_id=usuario_id,
+        email=current.get("email"),
+        empresa_id=current.get("empresaId"),
+        tipo=evento.tipo.value,
+        dispositivo_id=dispositivo_id,
+        screen_name=evento.screenName,
+        in_schedule=evento.inSchedule,
+    )
 
     return {
         "ok": True,
@@ -269,8 +280,19 @@ async def bulk_events(
         )
     await db.commit()
 
-    # 4) Métricas
+    # 4) Métricas + audit
+    tipos_count: dict[str, int] = {}
     for ev in body.events:
         events_ingested_total.labels(tipo=ev.type.value).inc()
+        tipos_count[ev.type.value] = tipos_count.get(ev.type.value, 0) + 1
+    log_audit(
+        "events_bulk_ingested",
+        usuario_id=usuario_id,
+        email=current.get("email"),
+        empresa_id=current.get("empresaId"),
+        accepted=len(rows),
+        tipos=tipos_count,
+        devices_touched=len(touched_devices),
+    )
 
     return BulkEventsResponse(accepted=len(rows), queuedJobId="inline")

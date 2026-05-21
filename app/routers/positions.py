@@ -16,6 +16,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.audit import log_audit
 from app.core.db import get_session
 from app.core.deps import CurrentUser
 from app.models.eventos import Posicion
@@ -81,5 +82,16 @@ async def report_position(
     dev.lastSeen = now
 
     await db.commit()
+
+    log_audit(
+        "position_reported",
+        usuario_id=current["sub"],
+        email=current.get("email"),
+        empresa_id=current.get("empresaId"),
+        dispositivo_id=dev.id,
+        lat=float(body.lat),
+        lng=float(body.lng),
+        inserted=inserted,
+    )
 
     return PositionReportResponse(inserted=inserted, queuedJobId=None)
