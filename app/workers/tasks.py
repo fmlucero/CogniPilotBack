@@ -181,23 +181,20 @@ async def check_repartidor_threshold(
             umbral=umbral,
         )
 
-        # Publish SSE channel (best-effort — si Redis no responde no abortamos).
-        try:
-            from redis.asyncio import Redis
+        # Publish SSE channel (best-effort) — via services.realtime para que
+        # el formato del payload quede en un solo lugar.
+        from app.services.realtime import publish_alerta
 
-            redis = Redis.from_url(_settings.redis_url, decode_responses=True)
-            sse_payload = {
-                "type": "alerta",
-                "alerta_id": alerta.id,
-                "tipo": "umbral_errores",
-                "empresa_id": emp_id,
-                "ts": int(alerta.ts.timestamp() * 1000) if alerta.ts.tzinfo else int(alerta.ts.replace(tzinfo=timezone.utc).timestamp() * 1000),
-                **payload,
-            }
-            await redis.publish(CHANNEL_ALERTA, json.dumps(sse_payload, default=str))
-            await redis.aclose()
-        except Exception as e:  # noqa: BLE001
-            logger.warning("publish alerta SSE failed: %s", e)
+        ts_aware = alerta.ts if alerta.ts.tzinfo else alerta.ts.replace(tzinfo=timezone.utc)
+        sse_payload = {
+            "type": "alerta",
+            "alerta_id": alerta.id,
+            "tipo": "umbral_errores",
+            "empresa_id": emp_id,
+            "ts": int(ts_aware.timestamp() * 1000),
+            **payload,
+        }
+        await publish_alerta(sse_payload)
 
         return {
             "created": True,

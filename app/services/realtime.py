@@ -22,6 +22,7 @@ from app.core.config import get_settings
 logger = logging.getLogger(__name__)
 
 CHANNEL_SCHEDULE = "realtime:schedule"
+CHANNEL_ALERTA = "realtime:alerta"
 
 _redis_singleton: Redis | None = None
 
@@ -45,16 +46,22 @@ async def publish_schedule_updated(payload: dict[str, Any]) -> None:
         logger.warning("realtime publish failed (degradado a polling): %s", e)
 
 
-async def subscribe_schedule() -> AsyncIterator[dict[str, Any]]:
-    """Generador async que yielda mensajes del channel schedule.
+async def publish_alerta(payload: dict[str, Any]) -> None:
+    """HU-40 — Llamado desde el worker después de insertar una Alerta.
+    Best-effort: el SSE es la entrega "push", pero los clientes también
+    tienen el banner con polling cada 30s como fallback."""
+    try:
+        await _get_redis().publish(CHANNEL_ALERTA, json.dumps(payload, default=str))
+        logger.debug("realtime: published alerta_nueva")
+    except Exception as e:  # noqa: BLE001
+        logger.warning("realtime publish alerta failed: %s", e)
 
-    Cada SSE connection abre su propio iterador. La conexión Redis pubsub
-    es cancel-safe: si el cliente se desconecta, el generator termina y la
-    suscripción se cierra limpia.
-    """
+
+async def _subscribe_channel(channel: str) -> AsyncIterator[dict[str, Any]]:
+    """Helper genérico: abre pubsub a un channel y yieldea cada mensaje JSON."""
     redis = _get_redis()
     pubsub = redis.pubsub()
-    await pubsub.subscribe(CHANNEL_SCHEDULE)
+    await pubsub.subscribe(channel)
     try:
         async for raw in pubsub.listen():
             if raw.get("type") != "message":
@@ -65,7 +72,22 @@ async def subscribe_schedule() -> AsyncIterator[dict[str, Any]]:
             try:
                 yield json.loads(data)
             except json.JSONDecodeError:
-                logger.warning("realtime: payload no parseable, ignorado")
+                logger.warning("realtime: payload no parseable en %s, ignorado", channel)
     finally:
-        await pubsub.unsubscribe(CHANNEL_SCHEDULE)
+        await pubsub.unsubscribe(channel)
         await pubsub.aclose()
+
+
+def subscribe_schedule() -> AsyncIterator[dict[str, Any]]:
+    """Generador async que yielda mensajes del channel schedule.
+
+    Cada SSE connection abre su propio iterador. La conexión Redis pubsub
+    es cancel-safe: si el cliente se desconecta, el generator termina y la
+    suscripción se cierra limpia.
+    """
+    return _subscribe_channel(CHANNEL_SCHEDULE)
+
+
+def subscribe_alertas() -> AsyncIterator[dict[str, Any]]:
+    """HU-40 — Generador async para el channel de alertas."""
+    return _subscribe_channel(CHANNEL_ALERTA)
