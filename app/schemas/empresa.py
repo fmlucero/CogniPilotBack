@@ -60,6 +60,7 @@ class EmpresaPatchRequest(BaseModel):
     cuit: str | None = None
     contacto: Contacto | None = None
     activa: bool | None = None
+    umbralErroresJornada: int | None = Field(default=None, ge=1, le=99)
 
     @field_validator("nombre")
     @classmethod

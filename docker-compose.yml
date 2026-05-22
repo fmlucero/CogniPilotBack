@@ -114,11 +114,10 @@ services:
     networks:
       - cognipilot-net
 
-  # Worker arq — desactivado por default tras HU-18 (se removió la única task
-  # registrada que era el push FCM, y arq se niega a arrancar sin functions).
-  # Reactivar con `--profile with-worker` cuando se agregue la primera task
-  # async real (procesamiento batch, cron jobs, etc.) y se popule
-  # `WorkerSettings.functions` en app/workers/tasks.py.
+  # Worker arq — reactivado en HU-12 para procesar la task de detección de
+  # umbral de errores (check_repartidor_threshold). Sin profile: arranca con
+  # el up por default. Si en el futuro se necesita levantarlo aparte, agregar
+  # de nuevo `profiles: ["with-worker"]`.
   back-worker:
     image: cognipilot-back:latest
     container_name: cognipilot-back-worker
@@ -142,7 +141,6 @@ services:
     command: ["arq", "app.workers.tasks.WorkerSettings"]
     networks:
       - cognipilot-net
-    profiles: ["with-worker"]
 
   front:
     # Activar al hacer cutover post-validación

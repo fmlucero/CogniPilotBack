@@ -15,12 +15,31 @@ from sqlalchemy import insert, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from app.core.arq_client import get_arq_pool
 from app.core.audit import log_audit
 from app.core.db import get_session
 from app.core.deps import CurrentUser
 from app.core.observability import events_ingested_total
+from app.models.enums import TipoEvento
 from app.models.eventos import EventoApp
 from app.models.usuario import Dispositivo, Usuario
+
+# HU-12 — tipos que cuentan como "error bloqueado" para el umbral.
+_ERROR_TYPES = {"scan_detected", "user_continued"}
+
+
+async def _maybe_enqueue_threshold_check(usuario_id: str, empresa_id: str | None, tipos: set[str]) -> None:
+    """Encola la task de chequeo de umbral si entre los tipos ingestados hay alguno
+    que cuenta como error. Best-effort: si arq no está disponible (Redis caído)
+    loguea warning y sigue."""
+    if not (tipos & _ERROR_TYPES):
+        return
+    try:
+        pool = get_arq_pool()
+        await pool.enqueue_job("check_repartidor_threshold", usuario_id, empresa_id)
+    except Exception as e:  # noqa: BLE001
+        import logging
+        logging.getLogger(__name__).warning("threshold enqueue failed: %s", e)
 from app.schemas.evento import (
     BulkEventsRequest,
     BulkEventsResponse,
@@ -92,6 +111,10 @@ async def create_event(
         screen_name=evento.screenName,
         in_schedule=evento.inSchedule,
     )
+
+    # HU-12 — si fue un evento que cuenta como error, evaluar el umbral en el
+    # worker (no bloquea la response del ingesta).
+    await _maybe_enqueue_threshold_check(usuario_id, current.get("empresaId"), {evento.tipo.value})
 
     return {
         "ok": True,
@@ -310,5 +333,10 @@ async def bulk_events(
         tipos=tipos_count,
         devices_touched=len(touched_devices),
     )
+
+    # HU-12 — un solo enqueue por bulk: si alguno de los eventos fue error,
+    # el worker corre check_threshold una vez (la idempotencia interna evita
+    # duplicar la alerta del día).
+    await _maybe_enqueue_threshold_check(usuario_id, current.get("empresaId"), set(tipos_count.keys()))
 
     return BulkEventsResponse(accepted=len(rows), queuedJobId="inline")

@@ -6,6 +6,7 @@ así Alembic puede tomar ownership de la DB existente con un baseline sin tocar 
 Importar todos los modelos acá para que SQLAlchemy los registre en Base.metadata,
 necesario para que Alembic autogenere migraciones.
 """
+from app.models.alerta import Alerta
 from app.models.audit import AuditEvent
 from app.models.empresa import Empresa
 from app.models.enums import AccionRegla, Rol, TipoEvento, TipoRegla
@@ -15,6 +16,7 @@ from app.models.regla import Regla, ReglaHistorial
 from app.models.usuario import Dispositivo, Usuario
 
 __all__ = [
+    "Alerta",
     "AuditEvent",
     "Empresa",
     "Usuario",

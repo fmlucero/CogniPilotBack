@@ -5,7 +5,7 @@ import uuid
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
-from sqlalchemy import Boolean, DateTime, String, func
+from sqlalchemy import Boolean, DateTime, Integer, String, func
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -29,6 +29,11 @@ class Empresa(Base):
     activa: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="true")
     createdAt: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    # HU-12 — umbral de "errores" (scan_detected + user_continued) por jornada
+    # local; al superarse se dispara una Alerta para el supervisor.
+    umbralErroresJornada: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=3, server_default="3"
     )
 
     # Relationships

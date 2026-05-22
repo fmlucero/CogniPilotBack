@@ -55,6 +55,7 @@ async def _empresa_with_counts(db: AsyncSession, empresa: Empresa) -> dict[str, 
         "contacto": empresa.contacto,
         "activa": empresa.activa,
         "createdAt": empresa.createdAt,
+        "umbralErroresJornada": empresa.umbralErroresJornada,
         "_count": {
             "usuarios": int(row.usuarios or 0),
             "rutas": int(row.rutas or 0),
@@ -173,6 +174,10 @@ async def patch_empresa(
 
     if body.activa is not None:
         empresa.activa = body.activa
+        updates_applied = True
+
+    if body.umbralErroresJornada is not None:
+        empresa.umbralErroresJornada = body.umbralErroresJornada
         updates_applied = True
 
     if not updates_applied:
