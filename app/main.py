@@ -37,6 +37,7 @@ from app.routers import (
     reportes,
     reset_password,
     schedule,
+    system,
     usuarios,
 )
 
@@ -183,6 +184,7 @@ app.include_router(alertas.router)
 app.include_router(admin_settings.router)
 app.include_router(reset_password.public_router)
 app.include_router(reset_password.admin_router)
+app.include_router(system.router)
 
 
 @app.get("/", include_in_schema=False)
