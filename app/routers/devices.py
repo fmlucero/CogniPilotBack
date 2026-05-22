@@ -1,7 +1,8 @@
 """Endpoints de dispositivos.
 
-POST /api/devices/register  — upsert desde la app Android (cualquier user auth).
-GET  /api/devices            — HU-35: listado plano con scope por rol.
+POST  /api/devices/register                      — upsert desde la app Android.
+PATCH /api/devices/{deviceUuid}/capabilities    — HU-43: reportar permisos.
+GET   /api/devices                               — HU-35: listado plano.
 """
 from __future__ import annotations
 
@@ -13,10 +14,13 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from app.core.audit import log_audit
 from app.core.db import get_session
 from app.core.deps import CurrentUser
 from app.models.usuario import Dispositivo, Usuario
 from app.schemas.dispositivo import (
+    CapabilitiesPatchResponse,
+    CapabilitiesReport,
     DeviceRegisterRequest,
     DeviceRegisterResponse,
     DeviceShortResponse,
@@ -25,6 +29,17 @@ from app.schemas.dispositivo import (
 )
 
 router = APIRouter(prefix="/api/devices", tags=["devices"])
+
+# HU-43 — capabilities que cuentan para el estado "ready":
+# si TODAS las requeridas son True (y el report es <24h), el device está listo.
+REQUIRED_CAPABILITY_KEYS = (
+    "overlay_ok",
+    "accessibility_ok",
+    "location_perm",
+    "monitor_running",
+)
+# notifications_perm queda como soft (sirve para info pero no bloquea ready).
+CAPABILITIES_FRESHNESS = timedelta(hours=24)
 
 
 @router.post("/register", response_model=DeviceRegisterResponse)
@@ -67,9 +82,56 @@ async def register_device(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# GET /api/devices — HU-35: listado plano con scope por rol
+# PATCH /api/devices/{deviceUuid}/capabilities — HU-43
+#   La app Android reporta el estado actual de sus permisos.
+#   Ownership: el deviceUuid debe pertenecer al usuario del JWT.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+@router.patch("/{device_uuid}/capabilities", response_model=CapabilitiesPatchResponse)
+async def patch_capabilities(
+    device_uuid: str,
+    body: CapabilitiesReport,
+    current: CurrentUser,
+    db: Annotated[AsyncSession, Depends(get_session)],
+) -> CapabilitiesPatchResponse:
+    dev = (
+        await db.execute(
+            select(Dispositivo).where(Dispositivo.deviceUuid == device_uuid)
+        )
+    ).scalar_one_or_none()
+    if dev is None:
+        raise HTTPException(status_code=404, detail="Dispositivo no encontrado")
+    if dev.usuarioId != current["sub"]:
+        raise HTTPException(status_code=403, detail="Este dispositivo no es tuyo")
+
+    incoming = body.model_dump(exclude_none=True)
+    merged = {**(dev.capabilities or {}), **incoming}
+    now = datetime.now(timezone.utc)
+    dev.capabilities = merged
+    dev.capabilities_updated_at = now
+    await db.commit()
+
+    log_audit(
+        "capabilities_reported",
+        usuario_id=current["sub"],
+        email=current.get("email"),
+        dispositivo_id=dev.id,
+        device_uuid=device_uuid,
+        capabilities=incoming,
+    )
+
+    return CapabilitiesPatchResponse(
+        deviceUuid=device_uuid,
+        capabilities=merged,
+        capabilitiesUpdatedAt=int(now.timestamp() * 1000),
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# GET /api/devices — HU-35 + HU-43: listado plano con scope por rol
 #   admin global; supervisor su empresa; gerente/repartidor 403.
-#   Filtros opcionales: ?empresaId, ?usuarioId, ?activo, ?conexion
+#   Filtros opcionales: ?empresaId, ?usuarioId, ?activo, ?conexion, ?preflight
 # ─────────────────────────────────────────────────────────────────────────────
 
 
@@ -86,6 +148,19 @@ def _connection_state(last_seen: datetime, now: datetime) -> str:
     return "offline"
 
 
+def _preflight_status(caps: dict | None, updated_at: datetime | None, now: datetime) -> str:
+    """ready si TODAS las required son True y el report es <24h.
+    not_ready si hay report fresco pero alguna required falla o falta.
+    unknown si no hay report o el report es viejo."""
+    if updated_at is None or caps is None:
+        return "unknown"
+    if now - _aware_utc(updated_at) > CAPABILITIES_FRESHNESS:
+        return "unknown"
+    if all(caps.get(k) is True for k in REQUIRED_CAPABILITY_KEYS):
+        return "ready"
+    return "not_ready"
+
+
 @router.get("", response_model=DispositivosListResponse)
 async def list_dispositivos(
     current: CurrentUser,
@@ -94,15 +169,17 @@ async def list_dispositivos(
     usuarioId: Annotated[str | None, Query()] = None,
     activo: Annotated[bool | None, Query()] = None,
     conexion: Annotated[Literal["online", "active_today", "offline"] | None, Query()] = None,
+    preflight: Annotated[Literal["ready", "not_ready", "unknown"] | None, Query()] = None,
 ) -> DispositivosListResponse:
     rol = current["rol"]
-    if rol in ("gerente", "repartidor"):
+    # HU-43: gerente puede entrar a /jornada → permitido leer devices con scope empresa.
+    if rol == "repartidor":
         raise HTTPException(status_code=403, detail="Forbidden")
 
     empresa_scope: str | None = None
     if rol == "admin_sistema":
         empresa_scope = empresaId
-    else:  # supervisor
+    else:  # supervisor / gerente
         if not current["empresaId"]:
             raise HTTPException(status_code=403, detail="Usuario sin empresa asignada")
         if empresaId and empresaId != current["empresaId"]:
@@ -133,6 +210,9 @@ async def list_dispositivos(
         state = _connection_state(d.lastSeen, now)
         if conexion is not None and state != conexion:
             continue
+        pf = _preflight_status(d.capabilities, d.capabilities_updated_at, now)
+        if preflight is not None and pf != preflight:
+            continue
         u = d.usuario
         rows.append(DispositivoRow(
             id=d.id,
@@ -152,6 +232,12 @@ async def list_dispositivos(
             usuarioRol=u.rol.value,
             empresaId=u.empresaId,
             empresaNombre=u.empresa.nombre if u.empresa else None,
+            capabilities=d.capabilities,
+            capabilitiesUpdatedAt=(
+                int(_aware_utc(d.capabilities_updated_at).timestamp() * 1000)
+                if d.capabilities_updated_at is not None else None
+            ),
+            preflightStatus=pf,
         ))
 
     return DispositivosListResponse(dispositivos=rows)

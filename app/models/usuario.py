@@ -6,6 +6,8 @@ from datetime import datetime
 from decimal import Decimal
 from typing import TYPE_CHECKING
 
+from typing import Any
+
 from sqlalchemy import (
     Boolean,
     DateTime,
@@ -16,6 +18,7 @@ from sqlalchemy import (
     String,
     func,
 )
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.db import Base
@@ -83,6 +86,14 @@ class Dispositivo(Base):
     )
     createdAt: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    # HU-43 — pre-flight check: la app Android reporta el estado de sus permisos.
+    # Estructura libre (dict de bool/str), validada en el endpoint PATCH contra
+    # CAPABILITY_KEYS — guardarlo como JSONB nos deja agregar nuevas flags sin
+    # tocar el schema.
+    capabilities: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    capabilities_updated_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
     )
 
     # Relationships
