@@ -21,6 +21,7 @@ from app.core.db import SessionLocal
 from app.core.observability import active_devices, make_instrumentator, queue_depth
 from app.models.usuario import Dispositivo
 from app.routers import (
+    admin_settings,
     alertas,
     auditoria,
     auth,
@@ -178,6 +179,7 @@ app.include_router(me.router)
 app.include_router(auditoria.router)
 app.include_router(reglas.router)
 app.include_router(alertas.router)
+app.include_router(admin_settings.router)
 
 
 @app.get("/", include_in_schema=False)

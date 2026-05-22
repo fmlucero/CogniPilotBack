@@ -9,6 +9,7 @@ necesario para que Alembic autogenere migraciones.
 from app.models.alerta import Alerta
 from app.models.audit import AuditEvent
 from app.models.empresa import Empresa
+from app.models.system_setting import SystemSetting
 from app.models.enums import AccionRegla, Rol, TipoEvento, TipoRegla
 from app.models.eventos import EventoApp, Incidente, Posicion
 from app.models.operacion import Asignacion, Paquete, Parada, Ruta
@@ -19,6 +20,7 @@ __all__ = [
     "Alerta",
     "AuditEvent",
     "Empresa",
+    "SystemSetting",
     "Usuario",
     "Dispositivo",
     "Ruta",
