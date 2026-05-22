@@ -2,25 +2,28 @@
 
 Arrancarlo: `arq app.workers.tasks.WorkerSettings`
 
-HU-12 reactivó el worker. Task registrada:
-  - check_repartidor_threshold(ctx, repartidor_id, empresa_id) — cuenta
-    scan_detected + user_continued del repartidor en la jornada local;
-    si supera Empresa.umbralErroresJornada, crea una Alerta (si no hay
-    una idéntica de hoy) y la publica al SSE channel realtime:alerta.
-
-Si en el futuro hay otras tasks (cron jobs, batch processing), se agregan
-a `functions` y se registran con sus parámetros estandarizados (ctx + args).
+Tasks registradas:
+  - check_repartidor_threshold(ctx, repartidor_id, empresa_id) — disparado
+    desde events.py tras cada ingesta de scan_detected/user_continued.
+    Evalúa DOS criterios independientes:
+      a) HU-12 umbral fijo: errores_hoy >= Empresa.umbralErroresJornada
+         → alerta `umbral_errores`.
+      b) HU-15 anomalía estadística: errores_hoy > mean + 2*stddev de las
+         jornadas históricas del MISMO repartidor (mínimo 5 jornadas).
+         → alerta `anomalia_estadistica`.
+    Cada tipo es idempotente por día — no se duplica.
 """
 from __future__ import annotations
 
 import json
 import logging
+import math
 from datetime import datetime, timedelta, timezone
 from typing import Any
 from zoneinfo import ZoneInfo
 
 from arq.connections import RedisSettings
-from sqlalchemy import and_, select
+from sqlalchemy import and_, func, select
 
 from app.core.audit import log_audit
 from app.core.config import get_settings
@@ -54,6 +57,133 @@ def _today_local_range_utc() -> tuple[datetime, datetime]:
     start_local = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
     end_local = start_local + timedelta(days=1)
     return start_local.astimezone(timezone.utc), end_local.astimezone(timezone.utc)
+
+
+# HU-15 — ventana histórica para el cálculo. 90 días alcanza para tener una
+# media estable y no incluir comportamiento muy antiguo (el repartidor pudo
+# haber mejorado o cambiado de zona). Se podría enganchar al setting
+# `retencion.eventos_dias` cuando exista el read del catálogo desde el worker.
+_ANOMALY_HISTORY_DAYS = 90
+_ANOMALY_MIN_JORNADAS = 5
+_ANOMALY_SIGMAS = 2.0
+
+
+async def _compute_anomaly(
+    db, repartidor_id: str, day_start_utc: datetime
+) -> dict[str, Any] | None:
+    """HU-15 — Calcula si los errores de HOY del repartidor son anómalos
+    respecto a su historia personal.
+
+    Devuelve un dict con datos del cálculo si supera el umbral estadístico,
+    `None` si no hay suficiente data o si está dentro de lo normal.
+
+    Implementación: agrupa eventos error por día local (Argentina) usando
+    Postgres `date_trunc('day', ts AT TIME ZONE 'America/Argentina/...')`,
+    excluye hoy del cálculo de baseline. Si hay ≥5 jornadas históricas
+    con datos, computa mean+stddev y compara contra hoy.
+    """
+    history_start = day_start_utc - timedelta(days=_ANOMALY_HISTORY_DAYS)
+
+    # Agrupar por día LOCAL Argentina (ts at time zone Buenos_Aires → date).
+    bucket = func.date(func.timezone("America/Argentina/Buenos_Aires", EventoApp.ts)).label("d")
+    rows = (
+        await db.execute(
+            select(bucket, func.count(EventoApp.id))
+            .where(
+                and_(
+                    EventoApp.usuarioId == repartidor_id,
+                    EventoApp.tipo.in_(ERROR_EVENT_TYPES),
+                    EventoApp.ts >= history_start,
+                    EventoApp.ts < day_start_utc,  # excluye hoy
+                )
+            )
+            .group_by(bucket)
+        )
+    ).all()
+
+    counts_por_dia = [int(r[1]) for r in rows if r[1] is not None]
+    jornadas = len(counts_por_dia)
+    if jornadas < _ANOMALY_MIN_JORNADAS:
+        return None
+
+    mean = sum(counts_por_dia) / jornadas
+    var = sum((c - mean) ** 2 for c in counts_por_dia) / jornadas
+    stddev = math.sqrt(var)
+
+    # Si stddev == 0 (todos los días iguales) requerimos al menos 1 desvío
+    # arbitrario (=1.0) para no marcar anomalía por cualquier +1 sobre la media.
+    effective_stddev = stddev if stddev > 0 else 1.0
+    threshold = mean + _ANOMALY_SIGMAS * effective_stddev
+
+    # Count de hoy.
+    day_end_utc = day_start_utc + timedelta(days=1)
+    today_count = (await db.execute(
+        select(func.count(EventoApp.id)).where(
+            and_(
+                EventoApp.usuarioId == repartidor_id,
+                EventoApp.tipo.in_(ERROR_EVENT_TYPES),
+                EventoApp.ts >= day_start_utc,
+                EventoApp.ts < day_end_utc,
+            )
+        )
+    )).scalar_one()
+
+    if today_count <= threshold:
+        return None
+
+    return {
+        "errores_hoy": int(today_count),
+        "mean": round(mean, 2),
+        "stddev": round(stddev, 2),
+        "threshold": round(threshold, 2),
+        "jornadas_consideradas": jornadas,
+        "ventana_dias": _ANOMALY_HISTORY_DAYS,
+        "sigmas": _ANOMALY_SIGMAS,
+    }
+
+
+async def _create_and_publish_alerta(
+    db,
+    *,
+    empresa_id: str,
+    repartidor_id: str,
+    tipo: str,
+    payload: dict[str, Any],
+) -> Alerta:
+    """Inserta la fila Alerta, hace audit + publish SSE. La idempotencia
+    (no duplicar por día) es responsabilidad del caller."""
+    alerta = Alerta(
+        empresaId=empresa_id,
+        repartidorId=repartidor_id,
+        tipo=tipo,
+        payload=payload,
+        leida=False,
+    )
+    db.add(alerta)
+    await db.commit()
+    await db.refresh(alerta)
+
+    log_audit(
+        "alerta_emitida",
+        usuario_id=repartidor_id,
+        email=payload.get("repartidor_email"),
+        tipo=tipo,
+        alerta_id=alerta.id,
+    )
+
+    from app.services.realtime import publish_alerta
+
+    ts_aware = alerta.ts if alerta.ts.tzinfo else alerta.ts.replace(tzinfo=timezone.utc)
+    sse_payload = {
+        "type": "alerta",
+        "alerta_id": alerta.id,
+        "tipo": tipo,
+        "empresa_id": empresa_id,
+        "ts": int(ts_aware.timestamp() * 1000),
+        **payload,
+    }
+    await publish_alerta(sse_payload)
+    return alerta
 
 
 async def check_repartidor_threshold(
@@ -103,31 +233,7 @@ async def check_repartidor_threshold(
         )
         errores_hoy = len(count_q.all())
 
-        if errores_hoy < umbral:
-            return {"created": False, "errores_hoy": errores_hoy, "umbral": umbral}
-
-        # ¿Ya hay alerta de hoy para este repartidor?
-        existing = (
-            await db.execute(
-                select(Alerta).where(
-                    and_(
-                        Alerta.repartidorId == repartidor_id,
-                        Alerta.tipo == "umbral_errores",
-                        Alerta.ts >= day_start_utc,
-                        Alerta.ts < day_end_utc,
-                    )
-                )
-            )
-        ).scalar_one_or_none()
-        if existing is not None:
-            return {
-                "created": False,
-                "reason": "already_emitted_today",
-                "alerta_id": existing.id,
-                "errores_hoy": errores_hoy,
-            }
-
-        # Última posición conocida (criterio 4 del card).
+        # Última posición conocida — comparte payload entre ambos tipos de alerta.
         last_pos = (
             await db.execute(
                 select(Dispositivo)
@@ -143,65 +249,84 @@ async def check_repartidor_threshold(
             )
         ).scalar_one_or_none()
 
-        payload = {
+        def _last_seen_ms() -> int | None:
+            if not last_pos or not last_pos.lastSeen:
+                return None
+            ls = last_pos.lastSeen
+            if ls.tzinfo is None:
+                ls = ls.replace(tzinfo=timezone.utc)
+            return int(ls.timestamp() * 1000)
+
+        common_payload: dict[str, Any] = {
             "repartidor_id": user.id,
             "repartidor_nombre": user.nombre,
             "repartidor_email": user.email,
-            "errores_hoy": errores_hoy,
-            "umbral": umbral,
             "lat": float(last_pos.lastLat) if last_pos and last_pos.lastLat is not None else None,
             "lng": float(last_pos.lastLng) if last_pos and last_pos.lastLng is not None else None,
-            "last_seen": (
-                int(last_pos.lastSeen.replace(tzinfo=timezone.utc).timestamp() * 1000)
-                if last_pos and last_pos.lastSeen and last_pos.lastSeen.tzinfo is None
-                else int(last_pos.lastSeen.timestamp() * 1000)
-                if last_pos and last_pos.lastSeen
-                else None
-            ),
+            "last_seen": _last_seen_ms(),
         }
 
-        alerta = Alerta(
-            empresaId=emp_id,
-            repartidorId=repartidor_id,
-            tipo="umbral_errores",
-            payload=payload,
-            leida=False,
-        )
-        db.add(alerta)
-        await db.commit()
-        await db.refresh(alerta)
+        result: dict[str, Any] = {"created_alerts": []}
 
-        log_audit(
-            "alerta_emitida",
-            usuario_id=repartidor_id,
-            email=user.email,
-            tipo="umbral_errores",
-            alerta_id=alerta.id,
-            errores_hoy=errores_hoy,
-            umbral=umbral,
-        )
+        # ─── HU-12: umbral fijo ─────────────────────────────────────────────
+        if errores_hoy >= umbral:
+            existing_umbral = (
+                await db.execute(
+                    select(Alerta).where(
+                        and_(
+                            Alerta.repartidorId == repartidor_id,
+                            Alerta.tipo == "umbral_errores",
+                            Alerta.ts >= day_start_utc,
+                            Alerta.ts < day_end_utc,
+                        )
+                    )
+                )
+            ).scalar_one_or_none()
+            if existing_umbral is None:
+                payload = {**common_payload, "errores_hoy": errores_hoy, "umbral": umbral}
+                alerta = await _create_and_publish_alerta(
+                    db,
+                    empresa_id=emp_id,
+                    repartidor_id=repartidor_id,
+                    tipo="umbral_errores",
+                    payload=payload,
+                )
+                result["created_alerts"].append({"tipo": "umbral_errores", "alerta_id": alerta.id})
 
-        # Publish SSE channel (best-effort) — via services.realtime para que
-        # el formato del payload quede en un solo lugar.
-        from app.services.realtime import publish_alerta
+        # ─── HU-15: anomalía estadística ────────────────────────────────────
+        # Independiente del umbral fijo: un repartidor que normalmente tiene
+        # 1 error/día y hoy tiene 3 dispara anomalía aunque no llegue al
+        # umbral global de 3.
+        anomaly = await _compute_anomaly(db, repartidor_id, day_start_utc)
+        if anomaly is not None:
+            existing_anom = (
+                await db.execute(
+                    select(Alerta).where(
+                        and_(
+                            Alerta.repartidorId == repartidor_id,
+                            Alerta.tipo == "anomalia_estadistica",
+                            Alerta.ts >= day_start_utc,
+                            Alerta.ts < day_end_utc,
+                        )
+                    )
+                )
+            ).scalar_one_or_none()
+            if existing_anom is None:
+                payload = {**common_payload, **anomaly}
+                alerta = await _create_and_publish_alerta(
+                    db,
+                    empresa_id=emp_id,
+                    repartidor_id=repartidor_id,
+                    tipo="anomalia_estadistica",
+                    payload=payload,
+                )
+                result["created_alerts"].append({"tipo": "anomalia_estadistica", "alerta_id": alerta.id})
 
-        ts_aware = alerta.ts if alerta.ts.tzinfo else alerta.ts.replace(tzinfo=timezone.utc)
-        sse_payload = {
-            "type": "alerta",
-            "alerta_id": alerta.id,
-            "tipo": "umbral_errores",
-            "empresa_id": emp_id,
-            "ts": int(ts_aware.timestamp() * 1000),
-            **payload,
-        }
-        await publish_alerta(sse_payload)
-
-        return {
-            "created": True,
-            "alerta_id": alerta.id,
-            "errores_hoy": errores_hoy,
-            "umbral": umbral,
-        }
+        result["errores_hoy"] = errores_hoy
+        result["umbral"] = umbral
+        result["anomaly"] = anomaly
+        result["created"] = bool(result["created_alerts"])
+        return result
 
 
 class WorkerSettings:
