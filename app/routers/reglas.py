@@ -301,11 +301,26 @@ async def delete_regla(
 # ─────────────────────────────────────────────────────────────────────────────
 
 
+def _parse_ts(value: str | None) -> datetime | None:
+    """Acepta ms epoch como string o ISO8601 (mismo helper que /api/auditoria)."""
+    if value is None or value == "":
+        return None
+    if value.isdigit():
+        return datetime.fromtimestamp(int(value) / 1000, tz=timezone.utc)
+    try:
+        dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=f"timestamp inválido: {value}") from e
+    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+
 @router.get("/{regla_id}/historial", response_model=HistorialResponse)
 async def get_historial(
     regla_id: str,
     current: CurrentUser,
     db: Annotated[AsyncSession, Depends(get_session)],
+    from_: Annotated[str | None, Query(alias="from")] = None,
+    to: Annotated[str | None, Query()] = None,
 ) -> HistorialResponse:
     regla = (
         await db.execute(select(Regla).where(Regla.id == regla_id))
@@ -314,14 +329,19 @@ async def get_historial(
         raise HTTPException(status_code=404, detail="Regla no existe")
     _check_can_read(current, regla.empresaId)
 
-    entries = (
-        await db.execute(
-            select(ReglaHistorial)
-            .where(ReglaHistorial.reglaId == regla_id)
-            .options(selectinload(ReglaHistorial.usuario))
-            .order_by(ReglaHistorial.ts.desc())
-        )
-    ).scalars().all()
+    stmt = (
+        select(ReglaHistorial)
+        .where(ReglaHistorial.reglaId == regla_id)
+        .options(selectinload(ReglaHistorial.usuario))
+        .order_by(ReglaHistorial.ts.desc())
+    )
+    # HU-06 — filtrar por rango de fechas.
+    if (dt := _parse_ts(from_)) is not None:
+        stmt = stmt.where(ReglaHistorial.ts >= dt)
+    if (dt := _parse_ts(to)) is not None:
+        stmt = stmt.where(ReglaHistorial.ts <= dt)
+
+    entries = (await db.execute(stmt)).scalars().all()
 
     return HistorialResponse(
         historial=[
