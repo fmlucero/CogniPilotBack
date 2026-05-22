@@ -31,6 +31,7 @@ from app.routers import (
     metrics,
     positions,
     realtime,
+    reglas,
     reportes,
     schedule,
     usuarios,
@@ -174,6 +175,7 @@ app.include_router(metrics.router)
 app.include_router(reportes.router)
 app.include_router(me.router)
 app.include_router(auditoria.router)
+app.include_router(reglas.router)
 
 
 @app.get("/", include_in_schema=False)
