@@ -5,7 +5,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-TipoReglaLit = Literal["paquete_fuera_parada", "ventana_horaria", "app_bloqueada_en_horario"]
+TipoReglaLit = Literal["paquete_fuera_parada", "ventana_horaria", "app_bloqueada_en_horario", "geofence"]
 AccionReglaLit = Literal["bloquear", "alertar"]
 
 

@@ -27,6 +27,7 @@ class TipoRegla(str, enum.Enum):
     paquete_fuera_parada = "paquete_fuera_parada"
     ventana_horaria = "ventana_horaria"
     app_bloqueada_en_horario = "app_bloqueada_en_horario"
+    geofence = "geofence"  # HU-42 — bloquea escaneos fuera de un radio (lat/lng/radius_m)
 
 
 class TipoEvento(str, enum.Enum):
