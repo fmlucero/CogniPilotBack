@@ -9,8 +9,17 @@ Esto controla el crecimiento de la tabla cuando el repartidor está parado.
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from decimal import Decimal
+from decimal import Decimal, ROUND_HALF_UP
 from typing import Annotated
+
+# La columna DB Numeric(9, 6) tolera 6 decimales. Cuantizamos siempre antes
+# del insert para no fallar si el cliente manda Doubles con precisión
+# nativa (Android, JS) — ver schema posicion.py para detalles.
+_QUANT_6 = Decimal("0.000001")
+
+
+def _q(v: Decimal) -> Decimal:
+    return v.quantize(_QUANT_6, rounding=ROUND_HALF_UP)
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
@@ -65,20 +74,23 @@ async def report_position(
     else:
         ts = now
 
+    lat_q = _q(body.lat)
+    lng_q = _q(body.lng)
+
     if inserted:
         db.add(
             Posicion(
                 repartidorId=current["sub"],
                 dispositivoId=dev.id,
                 ts=ts,
-                lat=Decimal(body.lat),
-                lng=Decimal(body.lng),
+                lat=lat_q,
+                lng=lng_q,
             )
         )
 
     # Siempre actualizamos el snapshot del dispositivo
-    dev.lastLat = Decimal(body.lat)
-    dev.lastLng = Decimal(body.lng)
+    dev.lastLat = lat_q
+    dev.lastLng = lng_q
     dev.lastSeen = now
 
     await db.commit()

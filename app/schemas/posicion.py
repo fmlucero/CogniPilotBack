@@ -7,9 +7,12 @@ from typing import Annotated
 from pydantic import BaseModel, Field
 
 
-# Lat ∈ [-90, 90], Lng ∈ [-180, 180]. Decimal con 6 decimales (≈ 11cm).
-Latitude = Annotated[Decimal, Field(ge=-90, le=90, max_digits=9, decimal_places=6)]
-Longitude = Annotated[Decimal, Field(ge=-180, le=180, max_digits=9, decimal_places=6)]
+# Lat ∈ [-90, 90], Lng ∈ [-180, 180]. La columna DB es Numeric(9, 6) (≈ 11cm de
+# precisión); Pydantic acepta cualquier precisión y el router cuantiza a 6
+# decimales antes del insert para no rechazar payloads de Doubles (Android,
+# JavaScript) que vienen con 14+ dígitos significativos.
+Latitude = Annotated[Decimal, Field(ge=-90, le=90)]
+Longitude = Annotated[Decimal, Field(ge=-180, le=180)]
 
 
 class PositionReportRequest(BaseModel):
