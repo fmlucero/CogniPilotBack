@@ -108,6 +108,11 @@ services:
     # Para conectar al postgres que corre en el HOST (modo paralelo)
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    # HU-45: socket Docker en RO para que /api/system/containers liste el
+    # inventario completo (admin only). El back-api solo lee — no controla
+    # containers. El endpoint requiere auth admin antes de tocar el socket.
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
     # Puerto externo para validación previa al cutover (cuando nginx esté delante, se puede quitar)
     ports:
       - "${BACK_API_PORT:-8001}:8000"

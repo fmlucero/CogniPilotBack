@@ -23,6 +23,9 @@ dependencies = [
     # Observabilidad
     "prometheus-fastapi-instrumentator>=7.0.0",
     "prometheus-client>=0.21.0",
+    # HU-45: lectura del daemon Docker via /var/run/docker.sock para inventario
+    # de containers en /sistema/containers (admin only).
+    "aiodocker>=0.24.0",
 ]
 
 [dependency-groups]
