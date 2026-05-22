@@ -45,21 +45,25 @@ cognipilot-back/
 │   │   ├── evento.py, schedule.py, posicion.py, metrics.py, me.py
 │   ├── routers/                    ← Endpoints HTTP
 │   │   ├── health.py               ← /health, /health/db
-│   │   ├── auth.py                 ← /api/auth/{login,logout,me,refresh}
-│   │   ├── empresas.py             ← /api/empresas[/{id}]
-│   │   ├── usuarios.py             ← /api/usuarios[/{id}]
+│   │   ├── auth.py                 ← /api/auth/{login,logout,me,refresh,impersonate,stop-impersonating} (HU-34)
+│   │   ├── empresas.py             ← /api/empresas[/{id}[/detalle]] (HU-33)
+│   │   ├── usuarios.py             ← /api/usuarios[/{id}] (HU-22/23: detail con conexión)
 │   │   ├── schedule.py             ← /api/schedule (sin FCM tras HU-18)
-│   │   ├── events.py               ← /api/events (GET + POST, auth obligatoria desde HU-03)
-│   │   ├── devices.py              ← /api/devices/register
-│   │   ├── positions.py            ← /api/positions (haversine + diff)
-│   │   ├── me.py                   ← /api/me/{ruta,reglas} (HU-03, solo rol=repartidor)
-│   │   ├── realtime.py             ← /api/realtime/stream (SSE, HU-18 fase 4)
-│   │   └── metrics.py              ← /api/metrics/{overview,timeseries} (admin)
+│   │   ├── events.py               ← /api/events (GET con scope HU-30 + filtro ?tipo= HU-13, POST auth HU-03)
+│   │   ├── devices.py              ← /api/devices/register (Android) + /api/devices listado plano (HU-35)
+│   │   ├── positions.py            ← /api/positions (haversine + diff, cuantiza a 6 dec — I-24)
+│   │   ├── me.py                   ← /api/me/{ruta,reglas,password} (HU-03 + HU-24)
+│   │   ├── realtime.py             ← /api/realtime/stream (SSE HU-18) + /api/realtime/positions (HU-11)
+│   │   ├── reportes.py             ← /api/reportes/eventos.csv (HU-16 + filtros HU-37)
+│   │   └── metrics.py              ← /api/metrics/{overview,timeseries,kpis,health} (HU-21+14+38, admin)
 │   ├── services/
 │   │   ├── prometheus_client.py    ← Cliente HTTP de Prometheus para timeseries
 │   │   └── realtime.py             ← Redis pub/sub para SSE (HU-18 fase 4)
+│   ├── core/
+│   │   └── audit.py                ← HU-31: log_audit(event, **fields) → cognipilot.audit JSON-line
 │   ├── utils/
 │   │   ├── cuit.py                 ← Validación liviana CUIT
+│   │   ├── geo.py                  ← haversine_meters() para diff de posiciones
 │   │   └── password.py             ← Generador temp 12 chars
 │   └── workers/
 │       └── tasks.py                ← arq WorkerSettings (sin tasks activas tras HU-18 —
@@ -243,7 +247,20 @@ docker compose up -d --scale back-api=4
 | 12 | Cleanup Next.js: borrado `app/api/*` y `lib/{prisma,firebase-admin,password}.ts`. Server Components hacen `serverFetch()` a FastAPI con cookie forwarding. Front quedó como **solo UI**. Commit `7091e18` en repo `CogniPilotRemote`. | ✅ |
 | 13 | HU-18 — remover Firebase Cloud Messaging del back: borrado `app/services/fcm.py`, refs en schedule/observability/metrics, removida dep `firebase-admin` del `pyproject.toml`. App Android pasa a polling propio + SSE. | ✅ |
 | 14 | HU-03 — endpoints `/api/me/{ruta,reglas}` + auth obligatoria en `/api/events`. App Android con login JWT + Room para cache offline. | ✅ |
-| 15 | Dashboard React en `/admin/metricas` consumiendo `/api/metrics/*` (HU-21) | ⏳ |
+| 15 | Dashboard React en `/admin/metricas` consumiendo `/api/metrics/*` (HU-21) | ✅ |
+| 16 | HU-22/23: detalle de usuario + estado de conexión en `/api/usuarios/{id}` | ✅ |
+| 17 | HU-24: `POST /api/me/password` para cambio propio de contraseña | ✅ |
+| 18 | HU-29/30: feed de eventos con autor (selectinload usuario/empresa) + scope por rol + filtros `?tipo,empresaId,usuarioId,from,to` | ✅ |
+| 19 | HU-31: audit log estructurado JSON (`cognipilot.audit`) en login/event/position/impersonation | ✅ |
+| 20 | HU-32: container Prometheus levantado (profile `monitoring`) — `/metricas` con datos reales | ✅ |
+| 21 | HU-33: `GET /api/empresas/{id}/detalle` con usuarios + rutas + reglas + KPIs 7d | ✅ |
+| 22 | HU-34: impersonación admin → supervisor/gerente — JWT con claim `impersonated_by`, endpoints impersonate/stop, audit | ✅ |
+| 23 | HU-35: `GET /api/devices` listado plano con scope por rol + filtros (`?empresaId,usuarioId,activo,conexion`) | ✅ |
+| 24 | HU-14: `GET /api/metrics/kpis` (events_total, active_users, by_day, by_type, top_users) | ✅ |
+| 25 | HU-16/37: `GET /api/reportes/eventos.csv` (StreamingResponse, filtros + `?tipo=` para incidentes) | ✅ |
+| 26 | HU-38: `GET /api/metrics/health` (postgres + redis + prometheus checks + eventos_lag + devices_5m) | ✅ |
+| 27 | HU-11/41: `GET /api/realtime/positions` (snapshot mapa flota) + `POST /api/positions` recibe GPS de Android — I-24 (cuantización de Doubles) resuelto | ✅ |
+| 28 | HU-13: incidentes vía `/api/events?tipo=scan_detected,user_continued,warning_shown` | ✅ |
 
 Tokens JWT viejos siguen funcionando (mismo HS256, mismo secret, mismas claims) → durante el cutover **nadie se desloguea**. Validado end-to-end: cookies emitidas por FastAPI funcionan en Server Components de Next.js sin reconfiguración.
 
