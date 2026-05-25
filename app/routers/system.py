@@ -13,12 +13,18 @@ Recursos cubiertos:
 from __future__ import annotations
 
 import logging
+import os
+import platform
 import re
+import sys
 from datetime import datetime, timezone
 from typing import Any
 
 import aiodocker
 from fastapi import APIRouter, HTTPException
+from sqlalchemy import text
+
+from app.core.db import SessionLocal
 
 from app.core.deps import CurrentUser
 from app.services import http_recent
@@ -508,6 +514,53 @@ def _worker_settings_meta() -> dict[str, Any]:
         "job_timeout": getattr(WorkerSettings, "job_timeout", None),
         "keep_result": getattr(WorkerSettings, "keep_result", None),
         "health_check_interval": getattr(WorkerSettings, "health_check_interval", None),
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# HU-49 — Version/build info (público — útil para debug externo)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+async def _runtime_versions() -> dict[str, Any]:
+    """Lee versiones reales de postgres y redis vía clientes ya configurados."""
+    info: dict[str, Any] = {
+        "python": sys.version.split()[0],
+        "platform": platform.platform(),
+    }
+    # Postgres — connection.execute("select version()")
+    try:
+        async with SessionLocal() as db:
+            row = (await db.execute(text("SELECT version()"))).scalar()
+            info["postgres"] = (row or "").split(" on ")[0]  # truncar parte del host
+    except Exception as e:  # noqa: BLE001
+        info["postgres"] = f"err: {e}"
+    # Redis
+    try:
+        redis = _get_redis()
+        rinfo = await redis.info("server")
+        info["redis"] = rinfo.get("redis_version")
+    except Exception as e:  # noqa: BLE001
+        info["redis"] = f"err: {e}"
+    return info
+
+
+@router.get("/version")
+async def version() -> dict[str, Any]:
+    """HU-49 — Build info + versiones de runtime. **Público** (sin auth).
+
+    GIT_COMMIT y BUILD_TIME se inyectan en build-time via Dockerfile ARG.
+    Si no se setearon (build local sin script), aparece `unknown`."""
+    git_commit = os.environ.get("GIT_COMMIT", "unknown")
+    build_time = os.environ.get("BUILD_TIME", "unknown")
+    runtime = await _runtime_versions()
+    return {
+        "service": "cognipilot-back",
+        "git_commit": git_commit,
+        "git_commit_short": git_commit[:7] if git_commit != "unknown" else "unknown",
+        "build_time": build_time,
+        "runtime": runtime,
+        "server_time": int(datetime.now(timezone.utc).timestamp() * 1000),
     }
 
 

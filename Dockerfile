@@ -42,6 +42,14 @@ COPY alembic ./alembic
 COPY alembic.ini ./
 COPY scripts ./scripts
 
+# HU-49 — Build info embebida.
+# Inyectadas desde docker-compose `args:` o desde el comando de build:
+#   GIT_COMMIT=$(git rev-parse HEAD) BUILD_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ) \
+#     docker compose up -d --build back-api
+ARG GIT_COMMIT=unknown
+ARG BUILD_TIME=unknown
+ENV GIT_COMMIT=${GIT_COMMIT} BUILD_TIME=${BUILD_TIME}
+
 # Healthcheck básico
 HEALTHCHECK --interval=15s --timeout=5s --start-period=20s --retries=3 \
     CMD python -c "import urllib.request, sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/health', timeout=3).status == 200 else 1)"
