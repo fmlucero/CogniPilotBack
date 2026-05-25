@@ -20,6 +20,7 @@ import aiodocker
 from fastapi import APIRouter, HTTPException
 
 from app.core.deps import CurrentUser
+from app.services import http_recent
 
 router = APIRouter(prefix="/api/system", tags=["system"])
 logger = logging.getLogger(__name__)
@@ -416,3 +417,27 @@ async def topology(current: CurrentUser) -> dict[str, Any]:
         }
     finally:
         await docker.close()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# HU-47 — Peticiones HTTP recientes (ring buffer Redis)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+@router.get("/requests")
+async def requests(current: CurrentUser, limit: int = 100) -> dict[str, Any]:
+    """HU-47 — Últimas N peticiones que capturó el middleware HTTP.
+
+    El middleware se registra en `app/main.py` y publica a un ring buffer
+    Redis (key `system:http_recent`, LPUSH + LTRIM 0 99). Skip de
+    `/api/system/*` y `/metrics` para no contaminar el ring con
+    auto-refresh del propio endpoint."""
+    _require_admin(current)
+    items = await http_recent.recent(limit=limit)
+    now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+    return {
+        "items": items,
+        "count": len(items),
+        "max_items": http_recent.MAX_ITEMS,
+        "server_time": now_ms,
+    }

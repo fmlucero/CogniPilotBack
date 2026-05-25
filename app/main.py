@@ -8,10 +8,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import func, select
 
@@ -159,6 +160,51 @@ if settings.cors_origin_list:
         allow_methods=["*"],
         allow_headers=["*"],
     )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# HU-47 — Middleware HTTP recientes (ring buffer Redis)
+# Skip /api/system/* y /metrics: el primero loopea con el auto-refresh del
+# panel de peticiones; el segundo lo scrappea Prometheus cada 15s y satura
+# el ring. Mantener el set chico — el endpoint /api/system/requests también
+# está excluido por el prefix /api/system.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+_HTTP_RECENT_SKIP_PREFIXES = ("/api/system", "/metrics")
+
+
+@app.middleware("http")
+async def http_recent_middleware(request: Request, call_next):
+    path = request.url.path
+    if path.startswith(_HTTP_RECENT_SKIP_PREFIXES):
+        return await call_next(request)
+
+    start = time.perf_counter()
+    status = 500
+    try:
+        response = await call_next(request)
+        status = response.status_code
+        return response
+    finally:
+        # X-Forwarded-For respetado (nginx delante). Tomamos solo el primer hop.
+        xff = request.headers.get("x-forwarded-for") or ""
+        client_ip = xff.split(",")[0].strip() if xff else (request.client.host if request.client else None)
+        from app.services import http_recent as _hr
+        try:
+            await _hr.push({
+                "ts": int(datetime.now(timezone.utc).timestamp() * 1000),
+                "method": request.method,
+                "path": path,
+                "query": request.url.query or "",
+                "status": status,
+                "latency_ms": round((time.perf_counter() - start) * 1000, 2),
+                "client_ip": client_ip,
+                "user_agent": (request.headers.get("user-agent") or "")[:120],
+            })
+        except Exception:  # noqa: BLE001
+            # http_recent.push ya hace su propio try/except — esto es defensa extra.
+            pass
 
 # Prometheus instrumentation — expone /metrics y trackea HTTP automáticamente
 instrumentator = make_instrumentator()
