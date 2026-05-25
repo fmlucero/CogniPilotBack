@@ -1,7 +1,7 @@
 """HU-45..HU-49 — Endpoints de inspección de infraestructura.
 
-Todos admin_sistema only. Se agrupan acá para que la sección /sistema del
-front tenga un único namespace `/api/system/*`.
+Todos admin_sistema only (salvo HU-49 version, público). Se agrupan acá para
+que la sección /sistema del front tenga un único namespace `/api/system/*`.
 
 Recursos cubiertos:
   - GET /api/system/containers   HU-45: inventario completo via docker socket
@@ -9,8 +9,6 @@ Recursos cubiertos:
   - GET /api/system/requests     HU-47: últimas N peticiones HTTP (Redis ring)
   - GET /api/system/worker       HU-48: estado del worker arq
   - GET /api/system/version      HU-49: build/git/runtime info (este es público)
-
-Por ahora se implementa solo HU-45. Las demás se irán sumando.
 """
 from __future__ import annotations
 
@@ -152,6 +150,268 @@ async def list_containers(current: CurrentUser) -> dict[str, Any]:
             "containers": out,
             "total": len(out),
             "running": sum(1 for c in out if c["running"]),
+            "server_time": now_ms,
+        }
+    finally:
+        await docker.close()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# HU-46 — Topología del stack
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# El grafo es una representación del sistema productivo. Las cajas (nodes) y
+# las flechas (edges) son fijas — describen *qué debería haber* — y el estado
+# vivo (running, ip, ports, health) viene del daemon Docker. Si un container
+# del registry no está vivo aparece con status="missing"; si aparece un
+# container vivo fuera del registry, se devuelve con type="extra".
+#
+# Layout en columnas (para que el front pinte SVG sin libs):
+#   col 0: external   (cloudflare tunnel)
+#   col 1: proxy      (nginx)
+#   col 2: app        (back-api, back-worker, app Next.js)
+#   col 3: data       (postgres, redis)
+#   col 4: observ     (prometheus)
+
+
+_NODE_REGISTRY: list[dict[str, Any]] = [
+    {
+        "id": "cloudflare",
+        "label": "Cloudflare Tunnel",
+        "type": "external",
+        "column": 0,
+        "container": None,  # systemd service en el host — no es container
+        "default_ports": [{"port": 443, "type": "tcp", "label": "HTTPS"}],
+        "note": "Quick tunnel sin cuenta — URL cambia con cada arranque del service",
+    },
+    {
+        "id": "nginx",
+        "label": "nginx",
+        "type": "proxy",
+        "column": 1,
+        "container": "cognipilot-nginx",
+        "default_ports": [{"port": 80, "type": "tcp", "label": "HTTP"}],
+        "note": "Reverse proxy con resolver dinámico (Docker DNS)",
+    },
+    {
+        "id": "app",
+        "label": "Next.js (app)",
+        "type": "app",
+        "column": 2,
+        "container": "cognipilot-app",
+        "default_ports": [{"port": 3000, "type": "tcp", "label": "HTTP"}],
+        "note": "Front Next.js post-cutover — solo UI, Server Components hacen fetch al back",
+    },
+    {
+        "id": "back-api",
+        "label": "FastAPI (back-api)",
+        "type": "app",
+        "column": 2,
+        "container": "cognipilot-back-api",
+        "default_ports": [{"port": 8000, "type": "tcp", "label": "HTTP"}],
+        "note": "API principal — 18 routers + SSE + /metrics",
+    },
+    {
+        "id": "back-worker",
+        "label": "arq worker",
+        "type": "app",
+        "column": 2,
+        "container": "cognipilot-back-worker",
+        "default_ports": [],
+        "note": "Tareas async (alerta umbral errores HU-12)",
+    },
+    {
+        "id": "postgres",
+        "label": "Postgres 16",
+        "type": "data",
+        "column": 3,
+        "container": "cognipilot-postgres",
+        "default_ports": [{"port": 5432, "type": "tcp", "label": "Postgres"}],
+        "note": "DB principal — Alembic owns el schema",
+    },
+    {
+        "id": "redis",
+        "label": "Redis 7",
+        "type": "data",
+        "column": 3,
+        "container": "cognipilot-redis",
+        "default_ports": [{"port": 6379, "type": "tcp", "label": "Redis"}],
+        "note": "Cache + pub/sub realtime + queue arq",
+    },
+    {
+        "id": "prometheus",
+        "label": "Prometheus",
+        "type": "observ",
+        "column": 4,
+        "container": "cognipilot-prometheus",
+        "default_ports": [{"port": 9090, "type": "tcp", "label": "HTTP"}],
+        "note": "Scrape de /metrics cada 15s",
+    },
+]
+
+
+_EDGE_REGISTRY: list[dict[str, Any]] = [
+    {"from": "cloudflare", "to": "nginx", "label": "HTTPS → :80", "protocol": "http"},
+    {"from": "nginx", "to": "back-api", "label": "/api/* :8000", "protocol": "http"},
+    {"from": "nginx", "to": "back-api", "label": "/api/realtime/* (SSE)", "protocol": "sse"},
+    {"from": "nginx", "to": "app", "label": "/* :3000", "protocol": "http"},
+    {"from": "back-api", "to": "postgres", "label": "asyncpg :5432", "protocol": "tcp"},
+    {"from": "back-api", "to": "redis", "label": "cache+pubsub :6379", "protocol": "tcp"},
+    {"from": "back-worker", "to": "postgres", "label": "asyncpg :5432", "protocol": "tcp"},
+    {"from": "back-worker", "to": "redis", "label": "arq queue :6379", "protocol": "tcp"},
+    {"from": "prometheus", "to": "back-api", "label": "scrape /metrics", "protocol": "http"},
+]
+
+
+def _container_status(detail: dict[str, Any] | None) -> dict[str, Any]:
+    """Aplana el estado de un container al subconjunto que necesita el grafo."""
+    if detail is None:
+        return {
+            "running": False,
+            "state": None,
+            "health": None,
+            "restart_count": 0,
+            "started_at": None,
+            "uptime_ms": None,
+            "image": None,
+            "networks": [],
+            "ports": [],
+        }
+    state = detail.get("State") or {}
+    started_at_ms = _parse_started_at(state.get("StartedAt"))
+    now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+    uptime_ms = (now_ms - started_at_ms) if started_at_ms else None
+    health = (state.get("Health") or {}).get("Status")
+    # ports flat (igual al endpoint /containers)
+    ports_raw = (detail.get("NetworkSettings", {}) or {}).get("Ports") or {}
+    ports: list[dict[str, Any]] = []
+    for port_key, bindings in ports_raw.items():
+        private_port = int(port_key.split("/")[0])
+        port_type = port_key.split("/")[1] if "/" in port_key else "tcp"
+        if bindings:
+            for b in bindings:
+                ports.append({
+                    "host_ip": b.get("HostIp") or None,
+                    "host_port": int(b["HostPort"]) if b.get("HostPort") else None,
+                    "container_port": private_port,
+                    "type": port_type,
+                })
+        else:
+            ports.append({
+                "host_ip": None,
+                "host_port": None,
+                "container_port": private_port,
+                "type": port_type,
+            })
+    return {
+        "running": bool(state.get("Running")),
+        "state": state.get("Status"),
+        "health": health,
+        "restart_count": detail.get("RestartCount") or 0,
+        "started_at": started_at_ms,
+        "uptime_ms": uptime_ms,
+        "image": detail.get("Config", {}).get("Image") or detail.get("Image"),
+        "networks": _network_summary(detail.get("NetworkSettings")),
+        "ports": ports,
+    }
+
+
+@router.get("/topology")
+async def topology(current: CurrentUser) -> dict[str, Any]:
+    """HU-46 — Grafo del stack productivo: nodes (containers + cloudflare) + edges."""
+    _require_admin(current)
+
+    docker = aiodocker.Docker()
+    try:
+        # Indexar containers vivos por nombre (sin slash inicial).
+        raw = await docker.containers.list(all=True)
+        by_name: dict[str, dict[str, Any]] = {}
+        for c in raw:
+            try:
+                detail = await c.show()
+            except Exception:  # noqa: BLE001
+                detail = c._container
+            name = (detail.get("Name") or "").lstrip("/")
+            if name:
+                by_name[name] = detail
+
+        # Construir nodes desde el registry, enriqueciendo con datos vivos.
+        nodes: list[dict[str, Any]] = []
+        seen_containers: set[str] = set()
+        for spec in _NODE_REGISTRY:
+            container_name = spec.get("container")
+            detail = by_name.get(container_name) if container_name else None
+            if container_name and detail is not None:
+                seen_containers.add(container_name)
+            status = _container_status(detail)
+            # Para el nodo external (cloudflare) no hay container — marcamos
+            # status especial "external" sin probe.
+            if container_name is None:
+                node_status = "external"
+            elif detail is None:
+                node_status = "missing"
+            elif not status["running"]:
+                node_status = "stopped"
+            elif status["health"] == "unhealthy":
+                node_status = "unhealthy"
+            elif status["health"] == "starting":
+                node_status = "starting"
+            else:
+                node_status = "ok"
+
+            nodes.append({
+                "id": spec["id"],
+                "label": spec["label"],
+                "type": spec["type"],
+                "column": spec["column"],
+                "container_name": container_name,
+                "status": node_status,
+                "note": spec.get("note"),
+                "default_ports": spec.get("default_ports") or [],
+                "live": status,
+            })
+
+        # Containers vivos que NO están en el registry → extras.
+        for name, detail in by_name.items():
+            if name in seen_containers:
+                continue
+            status = _container_status(detail)
+            nodes.append({
+                "id": f"extra:{name}",
+                "label": name,
+                "type": "extra",
+                "column": 5,  # columna fuera del flujo principal
+                "container_name": name,
+                "status": "unknown" if status["running"] else "stopped",
+                "note": "Container vivo sin lugar en el grafo definido",
+                "default_ports": [],
+                "live": status,
+            })
+
+        # Edges del registry sin filtrar — si un endpoint está missing,
+        # la edge sigue dibujada pero el front la pinta en gris.
+        edges = [
+            {
+                "from": e["from"],
+                "to": e["to"],
+                "label": e["label"],
+                "protocol": e["protocol"],
+            }
+            for e in _EDGE_REGISTRY
+        ]
+
+        now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+        return {
+            "nodes": nodes,
+            "edges": edges,
+            "columns": [
+                {"id": 0, "label": "Externo"},
+                {"id": 1, "label": "Proxy"},
+                {"id": 2, "label": "Aplicación"},
+                {"id": 3, "label": "Datos"},
+                {"id": 4, "label": "Observabilidad"},
+                {"id": 5, "label": "Extras"},
+            ],
             "server_time": now_ms,
         }
     finally:
