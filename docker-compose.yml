@@ -144,6 +144,16 @@ services:
       - "host.docker.internal:host-gateway"
     # Override del CMD del Dockerfile: corre el worker arq en vez de la API
     command: ["arq", "app.workers.tasks.WorkerSettings"]
+    # Override del HEALTHCHECK del Dockerfile (que hace urlopen :8000 — válido
+    # para back-api/uvicorn, no para el worker que no expone HTTP). Usamos
+    # `arq --check`, que lee el último heartbeat del worker desde Redis y exit 0
+    # si está vivo. health_check_interval default = 60s, por eso start_period 75s.
+    healthcheck:
+      test: ["CMD", "arq", "--check", "app.workers.tasks.WorkerSettings"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 75s
     networks:
       - cognipilot-net
 
