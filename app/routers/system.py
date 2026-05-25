@@ -13,6 +13,7 @@ Recursos cubiertos:
 from __future__ import annotations
 
 import logging
+import re
 from datetime import datetime, timezone
 from typing import Any
 
@@ -21,6 +22,7 @@ from fastapi import APIRouter, HTTPException
 
 from app.core.deps import CurrentUser
 from app.services import http_recent
+from app.services.realtime import _get_redis
 
 router = APIRouter(prefix="/api/system", tags=["system"])
 logger = logging.getLogger(__name__)
@@ -439,5 +441,116 @@ async def requests(current: CurrentUser, limit: int = 100) -> dict[str, Any]:
         "items": items,
         "count": len(items),
         "max_items": http_recent.MAX_ITEMS,
+        "server_time": now_ms,
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# HU-48 — Estado del worker arq
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# arq guarda toda su metadata en Redis bajo el prefijo `arq:*`. Las relevantes:
+#   - arq:queue                  zset con jobs pendientes (zcard = profundidad)
+#   - arq:queue:health-check     string con el último heartbeat del worker
+#   - arq:in-progress:<job_id>   string set por arq mientras corre el job
+#   - arq:job:<job_id>           pickle del job pendiente
+#   - arq:result:<job_id>        pickle del resultado (TTL = keep_result)
+#
+# No deserializamos los pickles (rieguen issues de seguridad y de imports).
+# Solo contamos keys y leemos el heartbeat (string plano).
+
+
+# Formato del heartbeat de arq, ej:
+#   "May-25 02:09:58 j_complete=0 j_failed=0 j_retried=0 j_ongoing=0 queued=0"
+_HB_RE = re.compile(
+    r"^(?P<when>\S+ \S+) "
+    r"j_complete=(?P<complete>\d+) "
+    r"j_failed=(?P<failed>\d+) "
+    r"j_retried=(?P<retried>\d+) "
+    r"j_ongoing=(?P<ongoing>\d+) "
+    r"queued=(?P<queued>\d+)"
+)
+
+
+def _parse_heartbeat(raw: str | None) -> dict[str, Any] | None:
+    if not raw:
+        return None
+    m = _HB_RE.match(raw.strip())
+    if not m:
+        return {"raw": raw, "parsed": False}
+    g = m.groupdict()
+    return {
+        "raw": raw,
+        "parsed": True,
+        "when_str": g["when"],
+        "j_complete": int(g["complete"]),
+        "j_failed": int(g["failed"]),
+        "j_retried": int(g["retried"]),
+        "j_ongoing": int(g["ongoing"]),
+        "queued": int(g["queued"]),
+    }
+
+
+def _worker_settings_meta() -> dict[str, Any]:
+    """Lee WorkerSettings de `app.workers.tasks` sin instanciar el worker.
+    Nombres de funciones + parámetros importantes para defensa de demo."""
+    from app.workers.tasks import WorkerSettings  # import local — evita ciclo
+    functions = []
+    for fn in getattr(WorkerSettings, "functions", []) or []:
+        functions.append({
+            "name": getattr(fn, "__name__", str(fn)),
+            "module": getattr(fn, "__module__", None),
+            "doc": (fn.__doc__ or "").strip().split("\n")[0] if fn.__doc__ else None,
+        })
+    return {
+        "functions": functions,
+        "max_tries": getattr(WorkerSettings, "max_tries", None),
+        "job_timeout": getattr(WorkerSettings, "job_timeout", None),
+        "keep_result": getattr(WorkerSettings, "keep_result", None),
+        "health_check_interval": getattr(WorkerSettings, "health_check_interval", None),
+    }
+
+
+@router.get("/worker")
+async def worker(current: CurrentUser) -> dict[str, Any]:
+    """HU-48 — Estado del worker arq: queue depth, in-progress, heartbeat,
+    functions registradas, conteos de resultados recientes."""
+    _require_admin(current)
+    redis = _get_redis()
+
+    # Contadores en paralelo via pipeline (1 roundtrip).
+    async with redis.pipeline(transaction=False) as pipe:
+        pipe.zcard("arq:queue")
+        pipe.get("arq:queue:health-check")
+        pipe.keys("arq:in-progress:*")
+        pipe.keys("arq:result:*")
+        pipe.keys("arq:job:*")
+        results = await pipe.execute()
+
+    queue_depth, hb_raw, in_progress_keys, result_keys, job_keys = results
+    heartbeat = _parse_heartbeat(hb_raw)
+    settings_meta = _worker_settings_meta()
+
+    # Health: si hay heartbeat reciente (< 3× health_check_interval), worker vivo.
+    hc_interval = settings_meta.get("health_check_interval") or 30
+    is_alive = heartbeat is not None  # arq sobreescribe el key cada health_check_interval
+
+    now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+    return {
+        "alive": is_alive,
+        "queue_depth": int(queue_depth or 0),
+        "in_progress_count": len(in_progress_keys or []),
+        "result_count": len(result_keys or []),
+        "pending_job_count": len(job_keys or []),
+        "heartbeat": heartbeat,
+        "settings": settings_meta,
+        "redis_keys_arq_total": (
+            (1 if hb_raw else 0)
+            + (1 if queue_depth else 0)
+            + len(in_progress_keys or [])
+            + len(result_keys or [])
+            + len(job_keys or [])
+        ),
+        "health_check_interval_s": hc_interval,
         "server_time": now_ms,
     }
