@@ -24,6 +24,7 @@ from app.models.usuario import Dispositivo
 from app.routers import (
     admin_settings,
     alertas,
+    asignaciones,
     auditoria,
     auth,
     devices,
@@ -228,6 +229,7 @@ app.include_router(me.router)
 app.include_router(auditoria.router)
 app.include_router(reglas.router)
 app.include_router(rutas.router)
+app.include_router(asignaciones.router)
 app.include_router(alertas.router)
 app.include_router(admin_settings.router)
 app.include_router(reset_password.public_router)
