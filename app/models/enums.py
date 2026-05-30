@@ -28,6 +28,7 @@ class TipoRegla(str, enum.Enum):
     ventana_horaria = "ventana_horaria"
     app_bloqueada_en_horario = "app_bloqueada_en_horario"
     geofence = "geofence"  # HU-42 — bloquea escaneos fuera de un radio (lat/lng/radius_m)
+    acceso_operativo = "acceso_operativo"  # HU-53 — acceso a la app de trabajo según geocerca y/o horario + modo
 
 
 class TipoEvento(str, enum.Enum):

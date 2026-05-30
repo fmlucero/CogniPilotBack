@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import ValidationError
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -25,6 +26,7 @@ from app.models.operacion import Ruta
 from app.models.regla import Regla, ReglaHistorial
 from app.models.usuario import Usuario
 from app.schemas.regla import (
+    AccesoOperativoCondicion,
     HistorialEntry,
     HistorialResponse,
     ReglaCreate,
@@ -34,6 +36,30 @@ from app.schemas.regla import (
 )
 
 router = APIRouter(prefix="/api/reglas", tags=["reglas"])
+
+
+def _normalize_condicion(tipo: str, condicion: dict) -> dict:
+    """Valida y normaliza la condición según el tipo de regla.
+
+    HU-53 — para `acceso_operativo` la condición tiene estructura estricta
+    (geo y/o horario + modo); la validamos con Pydantic y devolvemos el dict
+    normalizado (sin claves None) para guardar en JSONB. Los demás tipos
+    mantienen condición libre (compatibilidad con HU-04/05/42).
+    """
+    if tipo == "acceso_operativo":
+        try:
+            parsed = AccesoOperativoCondicion.model_validate(condicion)
+        except ValidationError as e:
+            msgs = "; ".join(
+                f"{'.'.join(str(p) for p in err['loc']) or 'condicion'}: {err['msg']}"
+                for err in e.errors()
+            )
+            raise HTTPException(
+                status_code=422,
+                detail=f"Condición inválida para acceso_operativo: {msgs}",
+            ) from e
+        return parsed.model_dump(exclude_none=True)
+    return condicion
 
 
 def _aware_utc(dt: datetime) -> datetime:
@@ -166,7 +192,7 @@ async def create_regla(
         nombre=body.nombre,
         tipo=TipoRegla(body.tipo),
         accion=AccionRegla(body.accion),
-        condicion=body.condicion,
+        condicion=_normalize_condicion(body.tipo, body.condicion),
         activa=body.activa,
     )
     db.add(regla)
@@ -220,6 +246,17 @@ async def update_regla(
             raise HTTPException(status_code=404, detail="Ruta no existe")
         if ruta.empresaId != regla.empresaId:
             raise HTTPException(status_code=422, detail="La ruta no pertenece a la empresa de la regla")
+
+    # HU-53 — si la regla queda como acceso_operativo (por cambio de tipo y/o de
+    # condición), validamos y normalizamos la condición efectiva. Esto también
+    # cubre el caso de cambiar SOLO el tipo a acceso_operativo: validamos la
+    # condición ya guardada y la rechazamos si no cumple la estructura.
+    eff_tipo = changes.get("tipo", regla.tipo.value)
+    if eff_tipo == "acceso_operativo" and ("tipo" in changes or "condicion" in changes):
+        eff_cond = changes["condicion"] if "condicion" in changes else regla.condicion
+        normalized = _normalize_condicion(eff_tipo, eff_cond)
+        if normalized != regla.condicion:
+            changes["condicion"] = normalized
 
     # Aplicar cambios + escribir historial por campo modificado.
     for campo, valor_new in changes.items():
