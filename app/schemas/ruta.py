@@ -86,8 +86,15 @@ class RutaResponse(BaseModel):
     paquetesCount: int
 
 
+class AsignadoItem(BaseModel):
+    """Repartidor asignado a la ruta + el día de trabajo de esa asignación."""
+    repartidorId: str
+    repartidorNombre: str
+    fecha: Date
+
+
 class RutaListItem(BaseModel):
-    """Item del listado — sin paradas anidadas, sólo contadores."""
+    """Item del listado — sin paradas anidadas, sólo contadores + asignados."""
     id: str
     empresaId: str
     empresaNombre: str | None = None
@@ -96,6 +103,7 @@ class RutaListItem(BaseModel):
     paradasCount: int
     paquetesCount: int
     asignacionesCount: int
+    asignados: list[AsignadoItem] = Field(default_factory=list)
 
 
 class RutasListResponse(BaseModel):

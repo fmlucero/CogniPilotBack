@@ -26,6 +26,7 @@ from app.models.empresa import Empresa
 from app.models.operacion import Asignacion, Paquete, Parada, Ruta
 from app.models.regla import Regla
 from app.schemas.ruta import (
+    AsignadoItem,
     ParadaIn,
     ParadaResponse,
     PaqueteResponse,
@@ -149,7 +150,7 @@ async def list_rutas(
         select(Ruta)
         .options(
             selectinload(Ruta.paradas).selectinload(Parada.paquetes),
-            selectinload(Ruta.asignaciones),
+            selectinload(Ruta.asignaciones).selectinload(Asignacion.repartidor),
             selectinload(Ruta.empresa),
         )
         .order_by(Ruta.fecha.desc(), Ruta.nombre.asc())
@@ -169,6 +170,14 @@ async def list_rutas(
                 paradasCount=len(r.paradas),
                 paquetesCount=sum(len(p.paquetes) for p in r.paradas),
                 asignacionesCount=len(r.asignaciones),
+                asignados=[
+                    AsignadoItem(
+                        repartidorId=a.repartidorId,
+                        repartidorNombre=a.repartidor.nombre if a.repartidor else "—",
+                        fecha=a.fecha,
+                    )
+                    for a in sorted(r.asignaciones, key=lambda a: a.fecha, reverse=True)
+                ],
             )
             for r in rutas
         ]
