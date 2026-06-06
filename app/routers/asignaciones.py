@@ -177,7 +177,10 @@ async def create_asignacion(
         await db.rollback()
         raise HTTPException(
             status_code=409,
-            detail="El repartidor ya tiene una ruta asignada para esa fecha",
+            detail=(
+                f"El repartidor ya tiene una ruta asignada para el "
+                f"{body.fecha.isoformat()}"
+            ),
         ) from e
     await db.refresh(asign)
 
