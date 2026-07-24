@@ -168,10 +168,21 @@ _BARRIO_FALLBACK: dict[str, tuple[float, float]] = {
 }
 _CABA_CENTER = (-34.6037, -58.3816)
 
+# Nominatim no resuelve si la calle viene con su tipo ("Calle Bulnes 1776" no
+# matchea, "Bulnes 1776" sí — la calle es "Bulnes"). Se saca el prefijo.
+_STREET_PREFIX_RE = re.compile(
+    r"^(calle|avenida|av\.?|pasaje|pje\.?|diagonal|diag\.?|bulevar|blvd\.?)\s+",
+    re.IGNORECASE,
+)
+
+
+def _clean_street(direccion: str) -> str:
+    return _STREET_PREFIX_RE.sub("", direccion or "").strip()
+
 
 def _geocode(direccion: str, barrio: str | None) -> tuple[Decimal, Decimal, bool]:
     """Devuelve (lat, lng, ok_real). ok_real=False si cayó al fallback."""
-    query = ", ".join(filter(None, [direccion, barrio, "Ciudad Autónoma de Buenos Aires", "Argentina"]))
+    query = ", ".join(filter(None, [_clean_street(direccion), barrio, "Buenos Aires", "Argentina"]))
     url = "https://nominatim.openstreetmap.org/search?" + urllib.parse.urlencode(
         {"q": query, "format": "json", "limit": "1", "countrycodes": "ar"}
     )
