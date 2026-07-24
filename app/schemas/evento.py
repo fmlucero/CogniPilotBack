@@ -14,7 +14,10 @@ class EventCreateRequest(BaseModel):
     screenName: str | None = Field(default=None, max_length=120)
     appPackage: str | None = Field(default=None, max_length=120)
     keywords: list[str] = Field(default_factory=list, max_length=10)
-    screenText: list[str] = Field(default_factory=list, max_length=8)
+    # Modo exploración (captura de estructura de SC Pack) manda hasta ~70 líneas
+    # por snapshot; el resto de los eventos siguen mandando ≤8. El límite acota
+    # el payload sin recortar una captura de pantalla completa.
+    screenText: list[str] = Field(default_factory=list, max_length=80)
 
 
 class EventCompactResponse(BaseModel):
